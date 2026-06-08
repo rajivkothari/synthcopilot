@@ -2,6 +2,8 @@
 
 import random
 
+import pytest
+
 from synthcopilot.style import (
     NUM_CELLS,
     StyleProfile,
@@ -12,7 +14,12 @@ from synthcopilot.tests.synthfixtures import make_synth, note, rail
 
 
 def _alternating_map(path, n=40):
-    """A map where hands strictly alternate and notes walk left<->right."""
+    """A map where hands strictly alternate and notes walk left<->right.
+
+    Building a real .synth fixture needs SMH + soundfile; skip if unavailable.
+    """
+    pytest.importorskip("synth_mapping_helper.synth_format")
+    pytest.importorskip("soundfile")
     notes = []
     for i in range(n):
         hand = i % 2  # 0,1,0,1...
@@ -48,10 +55,6 @@ def test_learn_extracts_statistics(tmp_path):
     assert 0.4 < p.hand_right_prob < 0.6
     # Markov chain learned transitions for both hands.
     assert p.markov["0"] and p.markov["1"]
-    # Template captured and emptied.
-    assert p.template_raw is not None
-    assert p.template_raw["Notes_Expert"] == []
-    assert p.template_raw["BPM"] == 120.0
     # Rails observed.
     assert p.rail_rate > 0
 
@@ -73,7 +76,6 @@ def test_save_load_roundtrip(tmp_path):
     assert q.notes_per_beat == p.notes_per_beat
     assert q.markov == p.markov
     assert q.subdivision_weights == p.subdivision_weights
-    assert q.template_raw == p.template_raw
 
 
 def test_sampling_is_seed_deterministic():

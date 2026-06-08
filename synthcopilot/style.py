@@ -12,19 +12,15 @@ habits extracted from a folder of real ``.synth`` maps:
     notes *flow* from one position to the next (real maps move deliberately;
     they do not scatter)
 
-The profile also captures a representative map's ``track.json`` structure as
-a *template*, so a freshly generated map is byte-structurally a real Synth
-Riders file (with our notes swapped in) and imports cleanly into the official
-editor.
-
-The module is deliberately dependency-light (numpy + stdlib only) so style
-learning never needs librosa or an audio backend.
+Maps are read via :func:`synthcopilot.smh_io.load_synth`, so learning works
+on genuine ``.synth`` files. Producing editor-correct output is handled
+entirely by ``smh_io``; this module only computes statistics, so it needs no
+librosa or audio backend (numpy + stdlib only).
 """
 
 from __future__ import annotations
 
 import json
-import os
 import random
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -84,7 +80,6 @@ class StyleProfile:
     rail_length_beats: float = 4.0
     # markov[hand][from_cell] -> {to_cell: weight}
     markov: dict = field(default_factory=dict)
-    template_raw: dict | None = None
     source_maps: int = 0
 
     # ------------------------------------------------------------------ #
@@ -148,7 +143,6 @@ class StyleProfile:
             "rail_rate": self.rail_rate,
             "rail_length_beats": self.rail_length_beats,
             "markov": self.markov,
-            "template_raw": self.template_raw,
             "source_maps": self.source_maps,
             "grid": {"nx": NX, "ny": NY, "cell": CELL},
         }
@@ -169,7 +163,6 @@ class StyleProfile:
             rail_rate=d.get("rail_rate", 0.04),
             rail_length_beats=d.get("rail_length_beats", 4.0),
             markov=d.get("markov", {}),
-            template_raw=d.get("template_raw"),
             source_maps=d.get("source_maps", 0),
         )
 
@@ -207,7 +200,7 @@ class StyleProfile:
         Falls back to :meth:`default` characteristics for any field that the
         corpus does not inform (e.g. an empty folder yields the default).
         """
-        from synthcopilot.smh_io import load_trackdata  # local import: avoids cycle
+        from synthcopilot.smh_io import load_synth  # local import: avoids cycle
 
         paths = sorted(Path(folder).rglob("*.synth"))
         if max_maps:
@@ -225,16 +218,13 @@ class StyleProfile:
         alt_pairs = 0
         total_rails = 0
         rail_len_sum = 0.0
-        template_raw = None
         maps_used = 0
 
         for p in paths:
             try:
-                track = load_trackdata(str(p))
+                track = load_synth(str(p))
             except Exception:
                 continue
-            if template_raw is None and track.raw:
-                template_raw = _blank_template(track.raw)
             map_had_notes = False
             for diff in track.difficulties.values():
                 notes = sorted(diff.notes, key=lambda n: n.time)
@@ -292,7 +282,6 @@ class StyleProfile:
             rail_rate=(total_rails / total_beat_span) if total_beat_span > 0 else 0.0,
             rail_length_beats=(rail_len_sum / total_rails) if total_rails else 4.0,
             markov=markov,
-            template_raw=template_raw,
             source_maps=maps_used,
         )
 
@@ -309,18 +298,3 @@ def _weighted_choice(items: list, weights: list, rng: random.Random):
         if r <= acc:
             return item
     return items[-1]
-
-
-def _blank_template(raw: dict) -> dict:
-    """Copy a real track.json dict, emptying every note/rail/wall array.
-
-    Preserves the surrounding schema (BPM, metadata, and any unknown fields
-    Synth Riders expects) so generated maps import like native ones.
-    """
-    template = json.loads(json.dumps(raw))  # deep copy of JSON-safe data
-    for key in list(template.keys()):
-        if key.startswith(("Notes_", "Slides_", "Crouches_")) and isinstance(
-            template[key], list
-        ):
-            template[key] = []
-    return template

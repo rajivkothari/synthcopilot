@@ -1,6 +1,6 @@
 """SynthCoPilot GUI — dark synthwave control panel for beatmap generation.
 
-Wires directly into the parser, geometry, and rhythm backend modules.
+Wires directly into the smh_io, geometry, mapgen, and rhythm backend modules.
 Runs heavy work (librosa analysis, rail generation) on a background thread
 to keep the UI responsive, routing all print() output to the live console.
 """
@@ -14,10 +14,10 @@ from pathlib import Path
 
 import customtkinter as ctk
 
+from synthcopilot import smh_io
 from synthcopilot.cli import parse_timestamp
 from synthcopilot.geometry import generate_rail
-from synthcopilot.models import DIFFICULTIES, HAND_LEFT, HAND_RIGHT, Rail
-from synthcopilot.parser import cleanup, get_audio_path, load, save
+from synthcopilot.models import DIFFICULTIES, HAND_LEFT, HAND_RIGHT, Difficulty, Rail
 from synthcopilot.rhythm import detect_onsets, snap_notes_to_rail
 
 # -- Synthwave palette --
@@ -67,10 +67,9 @@ class SynthCoPilotApp(ctk.CTk):
         self.minsize(960, 640)
         self.configure(fg_color=BG_DARK)
 
-        self._track_data = None
-        self._work_dir = None
+        self._track_data = None       # neutral model, for display
+        self._synth = None            # held SMH SynthFile, the saveable artifact
         self._source_path = None
-        self._generated_audio = None
         self._generating = False
 
         self.grid_columnconfigure(1, weight=1)
@@ -450,44 +449,20 @@ class SynthCoPilotApp(ctk.CTk):
         if not path:
             return
 
-        if self._work_dir:
-            cleanup(self._work_dir)
-            self._work_dir = None
-            self._track_data = None
-
         try:
-            self._track_data, self._work_dir = load(path)
+            self._synth = smh_io.open_synth(path)
+            self._track_data = smh_io.load_synth(path)
             self._source_path = path
         except Exception as e:
             self.log(f"[ERROR] Failed to load: {e}")
             return
 
-        name = self._track_data.name or Path(path).stem
-        self._lbl_map_name.configure(text=name)
-
-        bpm = self._track_data.bpm
-        author = self._track_data.author or "Unknown"
-        audio = self._track_data.audio_filename or "none"
-        diffs_with_data = []
-        for d_name, d in self._track_data.difficulties.items():
-            total = len(d.notes) + len(d.rails) + len(d.walls)
-            if total:
-                diffs_with_data.append(f"{d_name} ({len(d.notes)}n/{len(d.rails)}r)")
-
-        detail_lines = [
-            f"Author: {author}  |  BPM: {bpm}",
-            f"Audio: {audio}",
-        ]
-        if diffs_with_data:
-            detail_lines.append("  ".join(diffs_with_data))
-        self._lbl_map_detail.configure(text="\n".join(detail_lines))
-
+        self._refresh_map_info()
         self.log(f"Loaded: {Path(path).name}")
-        self.log(f"  BPM={bpm}  Offset={self._track_data.offset}  Audio={audio}")
+        self.log(f"  BPM={self._track_data.bpm}  Offset={self._track_data.offset:.3f}")
         for d_name, d in self._track_data.difficulties.items():
-            total = len(d.notes) + len(d.rails) + len(d.walls)
-            if total:
-                self.log(f"  {d_name}: {len(d.notes)} notes, {len(d.rails)} rails, {len(d.walls)} walls")
+            if d.notes or d.rails:
+                self.log(f"  {d_name}: {len(d.notes)} notes, {len(d.rails)} rails")
 
     def _new_from_audio(self) -> None:
         """Generate a brand-new map from an audio file + a learned style."""
@@ -518,11 +493,9 @@ class SynthCoPilotApp(ctk.CTk):
         threading.Thread(target=self._new_worker, args=(params,), daemon=True).start()
 
     def _new_worker(self, p: dict) -> None:
-        import shutil
-        import tempfile
-
+        from synthcopilot.cli import _detect_bpm
         from synthcopilot.mapgen import generate_map
-        from synthcopilot.parser import new_track
+        from synthcopilot.smh_io import build_synthfile, new_track
         from synthcopilot.style import StyleProfile
 
         try:
@@ -535,30 +508,21 @@ class SynthCoPilotApp(ctk.CTk):
                 print("Using built-in default style")
 
             self._set_progress(0.20)
-            from synthcopilot.cli import _detect_bpm
-
             bpm, offset = _detect_bpm(p["audio"])
             print(f"Auto-detected BPM={bpm:.1f}, offset={offset:.3f}s")
 
-            # Stage a work dir with the audio so Save can repackage it.
-            if self._work_dir:
-                cleanup(self._work_dir)
-            work_dir = tempfile.mkdtemp(prefix="synthcopilot_gui_new_")
-            audio_name = os.path.basename(p["audio"])
-            shutil.copyfile(p["audio"], os.path.join(work_dir, audio_name))
-
-            name = os.path.splitext(audio_name)[0]
-            track = new_track(audio_filename=audio_name, bpm=bpm, offset=offset,
-                              name=name, template_raw=style.template_raw)
+            name = os.path.splitext(os.path.basename(p["audio"]))[0]
+            track = new_track(audio_filename=os.path.basename(p["audio"]),
+                              bpm=bpm, offset=offset, name=name)
 
             self._set_progress(0.45)
             summary = generate_map(track, p["audio"], style, difficulty=p["difficulty"])
-            self._set_progress(0.95)
 
+            self._set_progress(0.8)
+            # Build the real, saveable SynthFile (embeds + converts the audio).
+            self._synth = build_synthfile(track, p["audio"])
             self._track_data = track
-            self._work_dir = work_dir
             self._source_path = p["audio"]
-            self._generated_audio = p["audio"]
             print(f"Generated {summary['notes_added']} notes, "
                   f"{summary['rails_added']} rails into {p['difficulty']}")
             print("Ready — use 'Save / Export Map' to write the .synth.")
@@ -592,11 +556,11 @@ class SynthCoPilotApp(ctk.CTk):
         self._lbl_map_detail.configure(text="\n".join(lines))
 
     def _save_map(self) -> None:
-        if not self._track_data or not self._work_dir:
+        if not self._synth:
             self.log("[WARN] No map loaded — nothing to save.")
             return
 
-        default_name = Path(self._source_path).stem + "_modified.synth" if self._source_path else "output.synth"
+        default_name = Path(self._source_path).stem + ".synth" if self._source_path else "output.synth"
         path = ctk.filedialog.asksaveasfilename(
             title="Save .synth Map",
             defaultextension=".synth",
@@ -607,16 +571,8 @@ class SynthCoPilotApp(ctk.CTk):
             return
 
         try:
-            from synthcopilot import smh_io
-
-            if self._generated_audio and smh_io.HAS_SMH:
-                # Generated-from-audio maps are written as real, editor-correct
-                # .synth files via synth_mapping_helper.
-                out = smh_io.write_synth(self._track_data, self._generated_audio, path)
-                self.log(f"Saved: {out}  (real Synth Riders format)")
-            else:
-                out = save(self._track_data, self._work_dir, path)
-                self.log(f"Saved: {out}")
+            out = smh_io.save_synthfile(self._synth, path)
+            self.log(f"Saved: {out}  (real Synth Riders format)")
         except Exception as e:
             self.log(f"[ERROR] Save failed: {e}")
 
@@ -627,7 +583,7 @@ class SynthCoPilotApp(ctk.CTk):
     def _generate(self) -> None:
         if self._generating:
             return
-        if not self._track_data or not self._work_dir:
+        if not self._synth or not self._track_data:
             self.log("[WARN] Load a .synth map first.")
             return
 
@@ -714,54 +670,55 @@ class SynthCoPilotApp(ctk.CTk):
             if p["max_velocity"] > 0:
                 print(f"Applied bidirectional velocity clamping (max={p['max_velocity']:.1f})")
 
-            diff = self._track_data.difficulties.get(p["difficulty"])
-            if diff is None:
-                print(f"[ERROR] Difficulty '{p['difficulty']}' not found in track")
-                return
-
             new_rail = Rail(hand_type=p["hand"], nodes=rail_nodes)
-            diff.rails.append(new_rail)
             hand_name = "left" if p["hand"] == HAND_LEFT else "right"
             print(f"Injected rail into {p['difficulty']} ({hand_name} hand)")
 
-            notes_added = 0
+            notes = []
             if p["snap_to_audio"]:
+                import tempfile
+
                 self._set_progress(0.50)
-                audio_path = get_audio_path(self._work_dir)
-                if audio_path is None:
-                    print("[WARN] No audio file in archive — skipping onset detection")
-                else:
-                    print(f"Analyzing audio: {os.path.basename(audio_path)} "
-                          f"[{p['start_sec']:.1f}s - {p['end_sec']:.1f}s]")
+                with tempfile.TemporaryDirectory() as tmp:
+                    audio_path = smh_io.extract_audio(self._synth, tmp)
+                    if audio_path is None:
+                        print("[WARN] No audio in map — skipping onset detection")
+                    else:
+                        print(f"Analyzing audio "
+                              f"[{p['start_sec']:.1f}s - {p['end_sec']:.1f}s]")
+                        self._set_progress(0.55)
+                        raw_onsets = detect_onsets(
+                            audio_path, p["start_sec"], p["end_sec"], p["sensitivity"],
+                        )
+                        print(f"Detected {len(raw_onsets)} raw transients "
+                              f"(sensitivity={p['sensitivity']:.1f})")
+                        self._set_progress(0.75)
+                        notes = snap_notes_to_rail(
+                            raw_onsets, rail_nodes,
+                            p["start_sec"], p["end_sec"],
+                            self._track_data.bpm, self._track_data.offset,
+                            p["hand"],
+                            min_gap=p["cooldown"],
+                            max_hand_speed=p["max_hand_speed"],
+                        )
+                        filtered = len(raw_onsets) - len(notes)
+                        if filtered > 0:
+                            print(f"Filtered {filtered} notes "
+                                  f"(cooldown={p['cooldown'] * 1000:.0f}ms, "
+                                  f"max_speed={p['max_hand_speed']:.1f})")
+                        print(f"Snapped {len(notes)} notes to audio onsets")
 
-                    self._set_progress(0.55)
-                    raw_onsets = detect_onsets(
-                        audio_path, p["start_sec"], p["end_sec"], p["sensitivity"],
-                    )
-                    print(f"Detected {len(raw_onsets)} raw transients "
-                          f"(sensitivity={p['sensitivity']:.1f})")
-
-                    self._set_progress(0.75)
-                    notes = snap_notes_to_rail(
-                        raw_onsets, rail_nodes,
-                        p["start_sec"], p["end_sec"],
-                        self._track_data.bpm, self._track_data.offset,
-                        p["hand"],
-                        min_gap=p["cooldown"],
-                        max_hand_speed=p["max_hand_speed"],
-                    )
-                    filtered_count = len(raw_onsets) - len(notes)
-                    if filtered_count > 0:
-                        print(f"Filtered {filtered_count} notes "
-                              f"(cooldown={p['cooldown'] * 1000:.0f}ms, "
-                              f"max_speed={p['max_hand_speed']:.1f})")
-                    diff.notes.extend(notes)
-                    notes_added = len(notes)
-                    print(f"Snapped {notes_added} notes to audio onsets")
+            # Inject into the held SynthFile and mirror into the display model.
+            smh_io.add_notes_rails(self._synth, p["difficulty"], notes, [new_rail])
+            diff = self._track_data.difficulties.setdefault(
+                p["difficulty"], Difficulty(name=p["difficulty"])
+            )
+            diff.rails.append(new_rail)
+            diff.notes.extend(notes)
 
             self._set_progress(1.0)
-            total = len(rail_nodes) + notes_added
-            print(f"Done — {total} objects injected into {p['difficulty']}")
+            print(f"Done — {len(rail_nodes) + len(notes)} objects injected into {p['difficulty']}")
+            self.after(0, self._refresh_map_info)
 
         except Exception as e:
             print(f"[ERROR] Generation failed: {e}")
@@ -782,8 +739,6 @@ class SynthCoPilotApp(ctk.CTk):
     def destroy(self) -> None:
         sys.stdout = self._original_stdout
         sys.stderr = self._original_stderr
-        if self._work_dir:
-            cleanup(self._work_dir)
         super().destroy()
 
 

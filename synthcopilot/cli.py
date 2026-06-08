@@ -4,11 +4,11 @@ import argparse
 import json
 import sys
 
-from synthcopilot import __version__
-from synthcopilot.parser import cleanup, get_audio_path, inspect, load, new_track, save, write_new
+from synthcopilot import __version__, smh_io
 from synthcopilot.geometry import generate_rail
 from synthcopilot.rhythm import detect_onsets, snap_notes_to_rail
 from synthcopilot.models import HAND_LEFT, HAND_RIGHT, Rail
+from synthcopilot.smh_io import new_track
 from synthcopilot.style import StyleProfile
 from synthcopilot.mapgen import generate_map
 
@@ -27,65 +27,55 @@ def parse_timestamp(ts: str) -> float:
 
 def cmd_inspect(args):
     """Print a summary of a .synth file."""
-    summary = inspect(args.file)
-    print(json.dumps(summary, indent=2))
+    print(json.dumps(smh_io.synth_summary(args.file), indent=2))
 
 
 def cmd_generate(args):
-    """Generate a rail between two time anchors, optionally snapping notes to audio."""
-    track_data, work_dir = load(args.file)
-    try:
-        start_sec = parse_timestamp(args.start)
-        end_sec = parse_timestamp(args.end)
-        difficulty = args.difficulty
-        hand = HAND_LEFT if args.hand == "left" else HAND_RIGHT
+    """Augment an existing map: add a rail between two anchors, optionally
+    snapping notes to the track's audio. Reads/writes via SMH."""
+    import tempfile
 
-        start_beat = track_data.seconds_to_beats(start_sec)
-        end_beat = track_data.seconds_to_beats(end_sec)
+    synth = smh_io.open_synth(args.file)
+    bpm = float(synth.bpm)
+    offset = smh_io.synth_offset_seconds(synth)
 
-        start_anchor = (args.start_x, args.start_y, start_beat)
-        end_anchor = (args.end_x, args.end_y, end_beat)
+    start_sec = parse_timestamp(args.start)
+    end_sec = parse_timestamp(args.end)
+    hand = HAND_LEFT if args.hand == "left" else HAND_RIGHT
 
-        rail_nodes = generate_rail(
-            start=start_anchor,
-            end=end_anchor,
-            num_nodes=args.nodes,
-            rail_type=args.rail_type,
-            complexity=args.complexity,
-            fade_zone=args.fade_zone,
-            max_velocity=args.max_velocity,
-        )
+    start_beat = (start_sec - offset) * (bpm / 60.0)
+    end_beat = (end_sec - offset) * (bpm / 60.0)
 
-        diff = track_data.difficulties.get(difficulty)
-        if diff is None:
-            print(f"Difficulty '{difficulty}' not found in track", file=sys.stderr)
-            return 1
+    rail_nodes = generate_rail(
+        start=(args.start_x, args.start_y, start_beat),
+        end=(args.end_x, args.end_y, end_beat),
+        num_nodes=args.nodes,
+        rail_type=args.rail_type,
+        complexity=args.complexity,
+        fade_zone=args.fade_zone,
+        max_velocity=args.max_velocity,
+    )
+    rail = Rail(hand_type=hand, nodes=rail_nodes)
+    print(f"Added rail: {len(rail_nodes)} nodes, {args.rail_type} (complexity {args.complexity})")
 
-        new_rail = Rail(hand_type=hand, nodes=rail_nodes)
-        diff.rails.append(new_rail)
-        print(f"Added rail: {len(rail_nodes)} nodes, {args.rail_type} (complexity {args.complexity})")
-
-        if args.snap_to_audio:
-            audio_path = get_audio_path(work_dir)
+    notes = []
+    if args.snap_to_audio:
+        with tempfile.TemporaryDirectory() as tmp:
+            audio_path = smh_io.extract_audio(synth, tmp)
             if audio_path is None:
-                print("No audio file found in .synth archive", file=sys.stderr)
+                print("No audio found in the .synth archive", file=sys.stderr)
                 return 1
-
             onsets = detect_onsets(audio_path, start_sec, end_sec, args.sensitivity)
             notes = snap_notes_to_rail(
-                onsets, rail_nodes, start_sec, end_sec,
-                track_data.bpm, track_data.offset, hand,
-                min_gap=args.cooldown,
-                max_hand_speed=args.max_hand_speed,
+                onsets, rail_nodes, start_sec, end_sec, bpm, offset, hand,
+                min_gap=args.cooldown, max_hand_speed=args.max_hand_speed,
             )
-            diff.notes.extend(notes)
-            print(f"Snapped {len(notes)} notes to audio onsets")
+        print(f"Snapped {len(notes)} notes to audio onsets")
 
-        output = args.output or args.file.replace(".synth", "_modified.synth")
-        save(track_data, work_dir, output)
-        print(f"Saved: {output}")
-    finally:
-        cleanup(work_dir)
+    smh_io.add_notes_rails(synth, args.difficulty, notes, [rail])
+    output = args.output or args.file.replace(".synth", "_modified.synth")
+    smh_io.save_synthfile(synth, output)
+    print(f"Saved: {output}")
 
 
 def _detect_bpm(audio_path: str) -> tuple[float, float]:
@@ -142,7 +132,6 @@ def cmd_new(args):
     track = new_track(
         audio_filename=_os.path.basename(args.audio),
         bpm=bpm, offset=offset, name=name, author=args.author,
-        template_raw=style.template_raw,
     )
     summary = generate_map(
         track, args.audio, style, difficulty=args.difficulty,
@@ -153,19 +142,15 @@ def cmd_new(args):
           f"into {args.difficulty} "
           f"({'audio-gated' if summary['audio_used'] else 'grid-only, no audio analysis'})")
 
+    if not smh_io.HAS_SMH:
+        raise SystemExit(
+            "synth_mapping_helper is required to write editor-correct .synth files. "
+            "Install it: pip install synth-mapping-helper"
+        )
     output = args.output or _os.path.splitext(args.audio)[0] + ".synth"
-    from synthcopilot import smh_io
-
-    if smh_io.HAS_SMH:
-        smh_io.write_synth(track, args.audio, output, mapper=args.author or "SynthCoPilot")
-        print(f"Saved: {output}  (real Synth Riders format via synth_mapping_helper)")
-        print("Import this .synth into the official Synth Riders editor to refine.")
-    else:
-        write_new(track, args.audio, output)
-        print(f"Saved: {output}")
-        print("[WARN] synth_mapping_helper is not installed, so this file uses a "
-              "placeholder schema and will NOT import into the editor.")
-        print("       Install it for editor-correct output: pip install synth-mapping-helper")
+    smh_io.write_synth(track, args.audio, output, mapper=args.author or "SynthCoPilot")
+    print(f"Saved: {output}  (real Synth Riders format via synth_mapping_helper)")
+    print("Import this .synth into the official Synth Riders editor to refine.")
 
 
 def main():

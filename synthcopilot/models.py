@@ -1,7 +1,12 @@
-"""Data models for Synth Riders track data."""
+"""Data models for Synth Riders track data.
+
+These are SynthCoPilot's lightweight in-memory representation. Reading and
+writing real ``.synth`` files is handled by :mod:`synthcopilot.smh_io` (which
+delegates to ``synth_mapping_helper``); these dataclasses are the neutral
+form the generator and style engine operate on.
+"""
 
 from dataclasses import dataclass, field
-
 
 DIFFICULTIES = ("Easy", "Normal", "Hard", "Expert", "Master")
 
@@ -11,89 +16,30 @@ HAND_LEFT = 1
 
 @dataclass
 class Note:
+    """A single note. ``x``/``y`` are grid units (floor-relative y, center 1.5);
+    ``time`` is in beats."""
+
     time: float
     x: float
     y: float
     hand_type: int = HAND_RIGHT
-    raw: dict = field(default_factory=dict)
-
-    def to_dict(self) -> dict:
-        d = dict(self.raw)
-        d["time"] = self.time
-        d["Position"] = [self.x, self.y]
-        d["Type"] = self.hand_type
-        return d
-
-    @classmethod
-    def from_dict(cls, d: dict) -> "Note":
-        pos = d.get("Position", [0.0, 0.0])
-        return cls(
-            time=d.get("time", 0.0),
-            x=pos[0],
-            y=pos[1],
-            hand_type=d.get("Type", HAND_RIGHT),
-            raw=d,
-        )
 
 
 @dataclass
 class RailNode:
+    """One node along a rail path (same coordinate convention as Note)."""
+
     time: float
     x: float
     y: float
-    raw: dict = field(default_factory=dict)
-
-    def to_dict(self) -> dict:
-        d = dict(self.raw)
-        d["time"] = self.time
-        d["Position"] = [self.x, self.y]
-        return d
-
-    @classmethod
-    def from_dict(cls, d: dict) -> "RailNode":
-        pos = d.get("Position", [0.0, 0.0])
-        return cls(
-            time=d.get("time", 0.0),
-            x=pos[0],
-            y=pos[1],
-            raw=d,
-        )
 
 
 @dataclass
 class Rail:
+    """A rail: an ordered list of RailNodes for one hand."""
+
     hand_type: int = HAND_RIGHT
     nodes: list = field(default_factory=list)
-    raw: dict = field(default_factory=dict)
-
-    def to_dict(self) -> dict:
-        d = dict(self.raw)
-        d["Type"] = self.hand_type
-        d["notes"] = [n.to_dict() for n in self.nodes]
-        return d
-
-    @classmethod
-    def from_dict(cls, d: dict) -> "Rail":
-        return cls(
-            hand_type=d.get("Type", HAND_RIGHT),
-            nodes=[RailNode.from_dict(n) for n in d.get("notes", [])],
-            raw=d,
-        )
-
-
-@dataclass
-class Wall:
-    time: float
-    raw: dict = field(default_factory=dict)
-
-    def to_dict(self) -> dict:
-        d = dict(self.raw)
-        d["time"] = self.time
-        return d
-
-    @classmethod
-    def from_dict(cls, d: dict) -> "Wall":
-        return cls(time=d.get("time", 0.0), raw=d)
 
 
 @dataclass
@@ -112,7 +58,6 @@ class TrackData:
     author: str = ""
     difficulties: dict = field(default_factory=dict)
     audio_filename: str | None = None
-    raw: dict = field(default_factory=dict)
 
     def seconds_to_beats(self, seconds: float) -> float:
         """Convert a timestamp in seconds to beat time."""

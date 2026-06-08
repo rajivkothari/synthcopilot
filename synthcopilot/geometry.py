@@ -99,7 +99,6 @@ def _auto_control_points(
     dist = math.hypot(dx, dy)
     tension = max(dist * 0.35, 0.3)
 
-    mid = (p0 + p3) / 2.0
     perp = np.array([-dy, dx])
     if np.linalg.norm(perp) > 0:
         perp = perp / np.linalg.norm(perp)

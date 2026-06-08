@@ -101,8 +101,7 @@ python -m pytest synthcopilot/tests/ -q
 
 | Module | Purpose |
 |--------|---------|
-| `smh_io.py` | Adapter for **editor-correct** `.synth` read/write via `synth_mapping_helper` (our models ↔ SMH `SynthFile`/`DataContainer`); learns from real maps |
-| `parser.py` | Legacy/fallback ZIP I/O and from-scratch skeletons (`new_track`); superseded by `smh_io` for real-editor compatibility |
+| `smh_io.py` | The single `.synth` I/O layer — editor-correct read/write via `synth_mapping_helper` (our models ↔ SMH `SynthFile`/`DataContainer`), map skeletons (`new_track`), and real-map style learning |
 | `geometry.py` | Cubic Bezier rail generation with smoothstep envelope and bidirectional velocity clamping |
 | `rhythm.py` | librosa onset detection, whole-song onset envelope, cooldown filtering, velocity-gated note snapping |
 | `style.py` | Learn a style profile (density, position heatmap, hand cadence, per-hand Markov flow) from a folder of maps; JSON save/load; built-in defaults |

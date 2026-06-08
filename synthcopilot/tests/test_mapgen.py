@@ -3,7 +3,7 @@
 import pytest
 
 from synthcopilot.mapgen import generate_map
-from synthcopilot.parser import new_track
+from synthcopilot.smh_io import new_track
 from synthcopilot.style import StyleProfile
 
 

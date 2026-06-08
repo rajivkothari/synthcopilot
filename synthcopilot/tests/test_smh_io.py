@@ -1,9 +1,9 @@
 """Real .synth round-trip tests through synth_mapping_helper.
 
 These validate that generated maps are written in the genuine Synth Riders
-container format (the thing the in-game editor imports) — not just that our
-own parser can read them back. Skipped when synth_mapping_helper / soundfile
-are unavailable.
+container format (the thing the in-game editor imports), round-tripping
+through SMH itself. Skipped when synth_mapping_helper / soundfile are
+unavailable.
 """
 
 import numpy as np
@@ -15,7 +15,7 @@ sf_audio = pytest.importorskip("soundfile")
 from synthcopilot import smh_io
 from synthcopilot.mapgen import generate_map
 from synthcopilot.models import Note, Rail, RailNode
-from synthcopilot.parser import new_track
+from synthcopilot.smh_io import new_track
 from synthcopilot.style import StyleProfile
 
 
@@ -95,6 +95,38 @@ def test_load_synth_back_into_our_models(click_wav, tmp_path):
     assert abs(d.notes[0].y - 1.5) < 1e-6
     assert d.notes[0].hand_type == 0
     assert d.rails[0].hand_type == 1
+
+
+def test_augment_existing_map(click_wav, tmp_path):
+    # Write a map, reopen it, inject more, save, and confirm counts grew.
+    track = new_track(audio_filename="click.ogg", bpm=120.0, name="Aug")
+    track.difficulties["Expert"].notes.append(Note(time=4.0, x=1.0, y=1.5))
+    base = tmp_path / "base.synth"
+    smh_io.write_synth(track, click_wav, str(base))
+
+    synth = smh_io.open_synth(str(base))
+    smh_io.add_notes_rails(
+        synth, "Expert",
+        [Note(time=8.0, x=-1.0, y=2.0, hand_type=1)],
+        [Rail(hand_type=0, nodes=[RailNode(10.0, 0.0, 1.5), RailNode(10.5, 1.0, 2.0)])],
+    )
+    out = tmp_path / "aug.synth"
+    smh_io.save_synthfile(synth, str(out))
+
+    counts = smh.SynthFile.from_synth(out).difficulties["Expert"].get_counts()
+    assert counts["notes"]["total"] == 2  # original 1 + injected 1
+    assert counts["rails"]["total"] == 1
+
+
+def test_extract_audio_yields_readable_file(click_wav, tmp_path):
+    track = new_track(audio_filename="click.ogg", bpm=120.0, name="A")
+    track.difficulties["Expert"].notes.append(Note(time=4.0, x=0.0, y=1.5))
+    out = tmp_path / "a.synth"
+    smh_io.write_synth(track, click_wav, str(out))
+
+    synth = smh_io.open_synth(str(out))
+    audio_path = smh_io.extract_audio(synth, str(tmp_path))
+    assert audio_path and __import__("os").path.getsize(audio_path) > 0
 
 
 def test_full_generate_to_real_synth(click_wav, tmp_path):
