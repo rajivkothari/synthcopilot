@@ -154,9 +154,18 @@ def cmd_new(args):
           f"({'audio-gated' if summary['audio_used'] else 'grid-only, no audio analysis'})")
 
     output = args.output or _os.path.splitext(args.audio)[0] + ".synth"
-    write_new(track, args.audio, output)
-    print(f"Saved: {output}")
-    print("Import this .synth into the official Synth Riders editor to refine.")
+    from synthcopilot import smh_io
+
+    if smh_io.HAS_SMH:
+        smh_io.write_synth(track, args.audio, output, mapper=args.author or "SynthCoPilot")
+        print(f"Saved: {output}  (real Synth Riders format via synth_mapping_helper)")
+        print("Import this .synth into the official Synth Riders editor to refine.")
+    else:
+        write_new(track, args.audio, output)
+        print(f"Saved: {output}")
+        print("[WARN] synth_mapping_helper is not installed, so this file uses a "
+              "placeholder schema and will NOT import into the editor.")
+        print("       Install it for editor-correct output: pip install synth-mapping-helper")
 
 
 def main():

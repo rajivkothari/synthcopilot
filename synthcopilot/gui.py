@@ -70,6 +70,7 @@ class SynthCoPilotApp(ctk.CTk):
         self._track_data = None
         self._work_dir = None
         self._source_path = None
+        self._generated_audio = None
         self._generating = False
 
         self.grid_columnconfigure(1, weight=1)
@@ -557,6 +558,7 @@ class SynthCoPilotApp(ctk.CTk):
             self._track_data = track
             self._work_dir = work_dir
             self._source_path = p["audio"]
+            self._generated_audio = p["audio"]
             print(f"Generated {summary['notes_added']} notes, "
                   f"{summary['rails_added']} rails into {p['difficulty']}")
             print("Ready — use 'Save / Export Map' to write the .synth.")
@@ -605,8 +607,16 @@ class SynthCoPilotApp(ctk.CTk):
             return
 
         try:
-            out = save(self._track_data, self._work_dir, path)
-            self.log(f"Saved: {out}")
+            from synthcopilot import smh_io
+
+            if self._generated_audio and smh_io.HAS_SMH:
+                # Generated-from-audio maps are written as real, editor-correct
+                # .synth files via synth_mapping_helper.
+                out = smh_io.write_synth(self._track_data, self._generated_audio, path)
+                self.log(f"Saved: {out}  (real Synth Riders format)")
+            else:
+                out = save(self._track_data, self._work_dir, path)
+                self.log(f"Saved: {out}")
         except Exception as e:
             self.log(f"[ERROR] Save failed: {e}")
 

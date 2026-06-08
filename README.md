@@ -12,6 +12,25 @@ pip install -r synthcopilot/requirements.txt
 
 For the GUI, you also need `tkinter` (usually bundled with Python; on Ubuntu: `sudo apt install python3-tk`).
 
+### Editor-correct `.synth` I/O
+
+Reading and writing real Synth Riders `.synth` files (the format the in-game
+**Beatmap Editor** imports) is delegated to
+[`synth_mapping_helper`](https://github.com/adosikas/synth_mapping_helper), a
+mature community library whose format module is the de-facto reference
+implementation. It's listed in `requirements.txt`; if it isn't installed, the
+generator falls back to a placeholder schema that will **not** import into the
+editor (and warns you when it does so). To read/write genuine maps:
+
+```bash
+pip install synth-mapping-helper
+```
+
+> SynthCoPilot's own contribution is the **learned Markov style/flow**
+> generation layer; the editor-correct container format (`beatmap.meta.bin`,
+> embedded `.ogg` audio, 3D positions with `z = seconds × 20`, the rail/wall
+> model) is handled by `synth_mapping_helper` so we don't reinvent it.
+
 ## Usage
 
 ### CLI
@@ -82,7 +101,8 @@ python -m pytest synthcopilot/tests/ -q
 
 | Module | Purpose |
 |--------|---------|
-| `parser.py` | Load/save .synth ZIP files with lossless round-tripping; create new maps from scratch (`new_track`, `write_new`) |
+| `smh_io.py` | Adapter for **editor-correct** `.synth` read/write via `synth_mapping_helper` (our models ↔ SMH `SynthFile`/`DataContainer`); learns from real maps |
+| `parser.py` | Legacy/fallback ZIP I/O and from-scratch skeletons (`new_track`); superseded by `smh_io` for real-editor compatibility |
 | `geometry.py` | Cubic Bezier rail generation with smoothstep envelope and bidirectional velocity clamping |
 | `rhythm.py` | librosa onset detection, whole-song onset envelope, cooldown filtering, velocity-gated note snapping |
 | `style.py` | Learn a style profile (density, position heatmap, hand cadence, per-hand Markov flow) from a folder of maps; JSON save/load; built-in defaults |

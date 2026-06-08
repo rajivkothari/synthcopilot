@@ -207,7 +207,7 @@ class StyleProfile:
         Falls back to :meth:`default` characteristics for any field that the
         corpus does not inform (e.g. an empty folder yields the default).
         """
-        from synthcopilot.parser import cleanup, load  # local import: avoids cycle
+        from synthcopilot.smh_io import load_trackdata  # local import: avoids cycle
 
         paths = sorted(Path(folder).rglob("*.synth"))
         if max_maps:
@@ -230,53 +230,50 @@ class StyleProfile:
 
         for p in paths:
             try:
-                track, work_dir = load(str(p))
+                track = load_trackdata(str(p))
             except Exception:
                 continue
-            try:
-                if template_raw is None and track.raw:
-                    template_raw = _blank_template(track.raw)
-                map_had_notes = False
-                for diff in track.difficulties.values():
-                    notes = sorted(diff.notes, key=lambda n: n.time)
-                    if notes:
-                        map_had_notes = True
-                        span = notes[-1].time - notes[0].time
-                        if span > 0:
-                            total_beat_span += span
-                        total_notes += len(notes)
+            if template_raw is None and track.raw:
+                template_raw = _blank_template(track.raw)
+            map_had_notes = False
+            for diff in track.difficulties.values():
+                notes = sorted(diff.notes, key=lambda n: n.time)
+                if notes:
+                    map_had_notes = True
+                    span = notes[-1].time - notes[0].time
+                    if span > 0:
+                        total_beat_span += span
+                    total_notes += len(notes)
 
-                    # Per-hand cell sequences for the Markov chain.
-                    last_cell_by_hand: dict[int, int] = {}
-                    prev_hand = None
-                    for n in notes:
-                        c = cell_of(n.x, n.y)
-                        pos_counts[c] += 1
-                        subdiv_counts[_subdivision_of(n.time)] += 1
-                        if n.hand_type == HAND_RIGHT:
-                            right_notes += 1
-                        if prev_hand is not None:
-                            alt_pairs += 1
-                            if n.hand_type != prev_hand:
-                                alt_switches += 1
-                        prev_hand = n.hand_type
+                # Per-hand cell sequences for the Markov chain.
+                last_cell_by_hand: dict[int, int] = {}
+                prev_hand = None
+                for n in notes:
+                    c = cell_of(n.x, n.y)
+                    pos_counts[c] += 1
+                    subdiv_counts[_subdivision_of(n.time)] += 1
+                    if n.hand_type == HAND_RIGHT:
+                        right_notes += 1
+                    if prev_hand is not None:
+                        alt_pairs += 1
+                        if n.hand_type != prev_hand:
+                            alt_switches += 1
+                    prev_hand = n.hand_type
 
-                        hk = str(n.hand_type)
-                        prev_c = last_cell_by_hand.get(n.hand_type)
-                        if prev_c is not None:
-                            row = markov[hk].setdefault(str(prev_c), {})
-                            key = str(c)
-                            row[key] = row.get(key, 0) + 1
-                        last_cell_by_hand[n.hand_type] = c
+                    hk = str(n.hand_type)
+                    prev_c = last_cell_by_hand.get(n.hand_type)
+                    if prev_c is not None:
+                        row = markov[hk].setdefault(str(prev_c), {})
+                        key = str(c)
+                        row[key] = row.get(key, 0) + 1
+                    last_cell_by_hand[n.hand_type] = c
 
-                    for r in diff.rails:
-                        total_rails += 1
-                        if r.nodes:
-                            rail_len_sum += r.nodes[-1].time - r.nodes[0].time
-                if map_had_notes:
-                    maps_used += 1
-            finally:
-                cleanup(work_dir)
+                for r in diff.rails:
+                    total_rails += 1
+                    if r.nodes:
+                        rail_len_sum += r.nodes[-1].time - r.nodes[0].time
+            if map_had_notes:
+                maps_used += 1
 
         if total_notes == 0:
             raise ValueError(f"Maps under {folder} contained no notes to learn from")
