@@ -92,6 +92,54 @@ def cleanup(work_dir: str) -> None:
         shutil.rmtree(work_dir)
 
 
+def new_track(
+    audio_filename: str,
+    bpm: float,
+    offset: float = 0.0,
+    name: str = "",
+    author: str = "",
+    template_raw: dict | None = None,
+) -> TrackData:
+    """Build an empty TrackData skeleton for a brand-new map.
+
+    Creates an entry for every difficulty with no notes/rails/walls. If a
+    ``template_raw`` (captured from a real map by the style engine) is given,
+    the new map inherits its full track.json schema so it imports cleanly
+    into the official Synth Riders editor; otherwise a minimal skeleton is
+    used.
+    """
+    raw: dict = json.loads(json.dumps(template_raw)) if template_raw else {}
+    raw["BPM"] = bpm
+    raw["Offset"] = offset
+    raw["Name"] = name
+    raw["Author"] = author
+
+    track = TrackData(
+        bpm=bpm, offset=offset, name=name, author=author,
+        audio_filename=audio_filename, raw=raw,
+    )
+    for diff in DIFFICULTIES:
+        track.difficulties[diff] = Difficulty(name=diff)
+    return track
+
+
+def write_new(track_data: TrackData, audio_src_path: str, output_path: str) -> str:
+    """Package a from-scratch TrackData and its audio into a ``.synth`` file.
+
+    Sets up a temporary work directory, copies the audio in under
+    ``track_data.audio_filename``, then reuses :func:`save` to serialize
+    track.json and zip the archive. The temp directory is always cleaned up.
+    """
+    work_dir = tempfile.mkdtemp(prefix="synthcopilot_new_")
+    try:
+        if not track_data.audio_filename:
+            track_data.audio_filename = Path(audio_src_path).name
+        shutil.copyfile(audio_src_path, os.path.join(work_dir, track_data.audio_filename))
+        return save(track_data, work_dir, output_path)
+    finally:
+        cleanup(work_dir)
+
+
 def get_audio_path(work_dir: str) -> str | None:
     """Return the absolute path to the audio file inside the work directory."""
     filename = _find_audio_file(work_dir)

@@ -111,7 +111,15 @@ class SynthCoPilotApp(ctk.CTk):
             text_color="#ffffff", font=ctk.CTkFont(size=13, weight="bold"),
             command=self._load_map,
         )
-        self._btn_load.pack(padx=16, pady=(0, 12), fill="x")
+        self._btn_load.pack(padx=16, pady=(0, 8), fill="x")
+
+        self._btn_new = ctk.CTkButton(
+            sidebar, text="New from MP3",
+            fg_color=NEON_CYAN, hover_color="#00b8c2",
+            text_color="#000000", font=ctk.CTkFont(size=13, weight="bold"),
+            command=self._new_from_audio,
+        )
+        self._btn_new.pack(padx=16, pady=(0, 12), fill="x")
 
         info_frame = ctk.CTkFrame(sidebar, fg_color=BG_FRAME, corner_radius=8)
         info_frame.pack(padx=16, fill="x", pady=(0, 12))
@@ -479,6 +487,107 @@ class SynthCoPilotApp(ctk.CTk):
             total = len(d.notes) + len(d.rails) + len(d.walls)
             if total:
                 self.log(f"  {d_name}: {len(d.notes)} notes, {len(d.rails)} rails, {len(d.walls)} walls")
+
+    def _new_from_audio(self) -> None:
+        """Generate a brand-new map from an audio file + a learned style."""
+        if self._generating:
+            return
+
+        audio = ctk.filedialog.askopenfilename(
+            title="Select audio for new map",
+            filetypes=[("Audio", "*.mp3 *.ogg *.wav *.flac"), ("All Files", "*.*")],
+        )
+        if not audio:
+            return
+
+        learn_dir = ctk.filedialog.askdirectory(
+            title="Folder of .synth maps to learn style from (Cancel = built-in style)"
+        )
+
+        self._generating = True
+        self._btn_generate.configure(state="disabled")
+        self._btn_new.configure(state="disabled", text="GENERATING...")
+        self._progress.set(0)
+
+        params = {
+            "audio": audio,
+            "learn_dir": learn_dir or None,
+            "difficulty": self._diff_var.get(),
+        }
+        threading.Thread(target=self._new_worker, args=(params,), daemon=True).start()
+
+    def _new_worker(self, p: dict) -> None:
+        import shutil
+        import tempfile
+
+        from synthcopilot.mapgen import generate_map
+        from synthcopilot.parser import new_track
+        from synthcopilot.style import StyleProfile
+
+        try:
+            self._set_progress(0.05)
+            if p["learn_dir"]:
+                style = StyleProfile.learn(p["learn_dir"])
+                print(f"Learned style from {style.source_maps} map(s)")
+            else:
+                style = StyleProfile.default()
+                print("Using built-in default style")
+
+            self._set_progress(0.20)
+            from synthcopilot.cli import _detect_bpm
+
+            bpm, offset = _detect_bpm(p["audio"])
+            print(f"Auto-detected BPM={bpm:.1f}, offset={offset:.3f}s")
+
+            # Stage a work dir with the audio so Save can repackage it.
+            if self._work_dir:
+                cleanup(self._work_dir)
+            work_dir = tempfile.mkdtemp(prefix="synthcopilot_gui_new_")
+            audio_name = os.path.basename(p["audio"])
+            shutil.copyfile(p["audio"], os.path.join(work_dir, audio_name))
+
+            name = os.path.splitext(audio_name)[0]
+            track = new_track(audio_filename=audio_name, bpm=bpm, offset=offset,
+                              name=name, template_raw=style.template_raw)
+
+            self._set_progress(0.45)
+            summary = generate_map(track, p["audio"], style, difficulty=p["difficulty"])
+            self._set_progress(0.95)
+
+            self._track_data = track
+            self._work_dir = work_dir
+            self._source_path = p["audio"]
+            print(f"Generated {summary['notes_added']} notes, "
+                  f"{summary['rails_added']} rails into {p['difficulty']}")
+            print("Ready — use 'Save / Export Map' to write the .synth.")
+            self.after(0, self._refresh_map_info)
+            self._set_progress(1.0)
+        except Exception as e:
+            print(f"[ERROR] New map failed: {e}")
+        finally:
+            self.after(0, self._new_done)
+
+    def _new_done(self) -> None:
+        self._generating = False
+        self._btn_generate.configure(state="normal")
+        self._btn_new.configure(state="normal", text="New from MP3")
+
+    def _refresh_map_info(self) -> None:
+        """Update the sidebar info panel from the currently loaded track."""
+        if not self._track_data:
+            return
+        td = self._track_data
+        self._lbl_map_name.configure(text=td.name or "Untitled")
+        diffs = []
+        for d_name, d in td.difficulties.items():
+            total = len(d.notes) + len(d.rails) + len(d.walls)
+            if total:
+                diffs.append(f"{d_name} ({len(d.notes)}n/{len(d.rails)}r)")
+        lines = [f"Author: {td.author or 'Unknown'}  |  BPM: {td.bpm:.1f}",
+                 f"Audio: {td.audio_filename or 'none'}"]
+        if diffs:
+            lines.append("  ".join(diffs))
+        self._lbl_map_detail.configure(text="\n".join(lines))
 
     def _save_map(self) -> None:
         if not self._track_data or not self._work_dir:

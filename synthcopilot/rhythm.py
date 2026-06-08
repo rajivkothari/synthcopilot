@@ -173,3 +173,29 @@ def get_audio_duration(audio_path: str) -> float:
     if librosa is None:
         raise ImportError("librosa is required: pip install librosa soundfile")
     return float(librosa.get_duration(path=audio_path))
+
+
+def onset_strength_envelope(audio_path: str) -> tuple[np.ndarray, np.ndarray]:
+    """Compute a whole-song onset-strength envelope.
+
+    Returns (times, strengths) where ``times`` are frame timestamps in
+    seconds and ``strengths`` is the per-frame onset strength normalized to
+    [0, 1]. Used by the map generator to decide which beat-grid slots are
+    musically "active" across an entire track.
+    """
+    if librosa is None:
+        raise ImportError("librosa is required: pip install librosa soundfile")
+
+    y, sr = librosa.load(audio_path, sr=None)
+    env = librosa.onset.onset_strength(y=y, sr=sr)
+    times = librosa.times_like(env, sr=sr)
+    peak = float(env.max()) if env.size else 0.0
+    strengths = env / peak if peak > 0 else env
+    return times, strengths
+
+
+def strength_at(times: np.ndarray, strengths: np.ndarray, query_sec: float) -> float:
+    """Sample the onset-strength envelope at an arbitrary timestamp (seconds)."""
+    if times.size == 0:
+        return 0.0
+    return float(np.interp(query_sec, times, strengths))
