@@ -323,8 +323,17 @@ class SynthCoPilotApp(ctk.CTk):
             fg_color=NEON_GREEN, hover_color="#2ecc10",
             text_color="#000000", corner_radius=10,
             command=self._generate,
+            state="disabled",  # only for augmenting a loaded map
         )
-        self._btn_generate.pack(fill="x", pady=(0, 6))
+        self._btn_generate.pack(fill="x", pady=(0, 2))
+
+        self._lbl_generate_hint = ctk.CTkLabel(
+            action,
+            text="Adds one rail to a LOADED map between the Start/End times above. "
+                 "To make a new map from a song, use “New from MP3”.",
+            font=ctk.CTkFont(size=10), text_color=TEXT_DIM, wraplength=820,
+        )
+        self._lbl_generate_hint.pack(fill="x", pady=(0, 4))
 
         self._progress = ctk.CTkProgressBar(
             action, height=6, corner_radius=3,
@@ -332,6 +341,11 @@ class SynthCoPilotApp(ctk.CTk):
         )
         self._progress.pack(fill="x")
         self._progress.set(0)
+
+    def _set_generate_enabled(self) -> None:
+        """Enable the augment button only once a map is present."""
+        has_map = self._synth is not None
+        self._btn_generate.configure(state="normal" if has_map else "disabled")
 
     def _build_console(self) -> None:
         console_frame = ctk.CTkFrame(self, fg_color=BG_PANEL, corner_radius=0, height=170)
@@ -535,8 +549,8 @@ class SynthCoPilotApp(ctk.CTk):
 
     def _new_done(self) -> None:
         self._generating = False
-        self._btn_generate.configure(state="normal")
         self._btn_new.configure(state="normal", text="New from MP3")
+        self._set_generate_enabled()
 
     def _refresh_map_info(self) -> None:
         """Update the sidebar info panel from the currently loaded track."""
@@ -554,6 +568,7 @@ class SynthCoPilotApp(ctk.CTk):
         if diffs:
             lines.append("  ".join(diffs))
         self._lbl_map_detail.configure(text="\n".join(lines))
+        self._set_generate_enabled()
 
     def _save_map(self) -> None:
         if not self._synth:
@@ -727,7 +742,8 @@ class SynthCoPilotApp(ctk.CTk):
 
     def _generation_done(self) -> None:
         self._generating = False
-        self._btn_generate.configure(state="normal", text="GENERATE & INJECT SEQUENCE")
+        self._btn_generate.configure(text="GENERATE & INJECT SEQUENCE")
+        self._set_generate_enabled()
 
     def _set_progress(self, value: float) -> None:
         self.after(0, self._progress.set, value)
