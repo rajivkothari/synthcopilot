@@ -255,24 +255,21 @@ def _place_flow_notes(diff, onsets, energy_fn, covered, track, preset,
         if qbeat not in slots or score > slots[qbeat][0]:
             slots[qbeat] = (score, track.beats_to_seconds(qbeat))
 
-    # Select EVENLY across time: slide a window of `spacing` beats and take the
-    # strongest beat in each. This keeps a steady cadence everywhere — no long
-    # empty stretches in quiet sections, no clumping in loud ones.
+    # Select PER BAR on the strongest hits, so notes land on the song's groove
+    # (kick/snare accents) and follow the rhythm — not a metronomic fixed cadence
+    # — while still spreading evenly (every bar gets its share, none starved).
     candidates = sorted((b, sc, ts) for b, (sc, ts) in slots.items())
     density = max(1e-6, preset["note_density"] * density_scale)
-    spacing = 1.0 / density
+    bar = 4.0  # beats
+    per_bar = max(1, int(round(density * bar)))
+    by_bar: dict[int, list[tuple[float, float, float]]] = {}
+    for c in candidates:
+        by_bar.setdefault(int(c[0] // bar), []).append(c)
     kept: list[tuple[float, float, float]] = []
-    i = 0
-    w = candidates[0][0] if candidates else 0.0
-    while candidates and w < total_beats:
-        best = None
-        while i < len(candidates) and candidates[i][0] < w + spacing:
-            if best is None or candidates[i][1] > best[1]:
-                best = candidates[i]
-            i += 1
-        if best is not None:
-            kept.append(best)
-        w += spacing
+    for b_idx in sorted(by_bar):
+        top = sorted(by_bar[b_idx], key=lambda c: c[1], reverse=True)[:per_bar]
+        kept.extend(sorted(top, key=lambda c: c[0]))
+    kept.sort(key=lambda c: c[0])
 
     notes_added = 0
     prev_hand = HAND_LEFT
@@ -291,18 +288,18 @@ def _place_flow_notes(diff, onsets, energy_fn, covered, track, preset,
         # and resolve home next note (no trapped X-formation). Because notes are
         # sparse, there's reach to travel far between them without teleporting.
         if p is None:
-            tx = home * rng.uniform(0.6, 2.3)
-            ty = rng.uniform(0.8, 2.2)
+            tx = home * rng.uniform(1.0, 2.3)
+            ty = _sample_height(rng)
         else:
             if crossed[hand]:
-                tx = home * rng.uniform(0.9, 2.3)        # resolve back home
+                tx = home * rng.uniform(1.2, 2.3)        # resolve back home, outer
                 crossed[hand] = False
             elif rng.random() < 0.15:
-                tx = -home * rng.uniform(0.4, 1.8)       # deliberate cross-over
+                tx = -home * rng.uniform(0.6, 2.0)       # deliberate cross-over
                 crossed[hand] = True
             else:
-                tx = home * rng.uniform(0.5, 2.5)        # full home side, to the edge
-            ty = rng.uniform(Y_LO, Y_HI)                 # full vertical range, varied
+                tx = home * rng.uniform(0.9, 2.5)        # home side, biased outward
+            ty = _sample_height(rng)                     # favor low/high over chest
             # Sweep toward the target, clamped to reachable distance (no
             # teleport). The 0.95 keeps a little comfort margin under the limit.
             dt = t_sec - p[2]
@@ -322,6 +319,17 @@ def _place_flow_notes(diff, onsets, energy_fn, covered, track, preset,
         prev_hand = hand
 
     return notes_added, len(kept)
+
+
+def _sample_height(rng) -> float:
+    """Pick a y favoring low squats and overhead reaches over the chest band,
+    so notes don't pile into a horizontal mid-line."""
+    r = rng.random()
+    if r < 0.38:
+        return rng.uniform(Y_LO, 1.15)       # low
+    if r < 0.76:
+        return rng.uniform(1.85, Y_HI)       # high
+    return rng.uniform(1.15, 1.85)           # chest (less often)
 
 
 def _beat_emphasis(qbeat: float) -> float:
