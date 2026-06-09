@@ -36,15 +36,15 @@ from synthcopilot.style import StyleProfile
 PLAY_X = 2.5
 Y_LO, Y_HI = 0.7, 2.3
 
-# Per-difficulty character. note_density = single notes per beat (kept modest —
-# rails carry the energy). rail_rate = share of high-energy spans turned into
-# rails. max_complexity = ceiling for rail modifier intensity.
+# Per-difficulty character. note_density = notes per beat — kept low so notes
+# fall on *major* beats (rails carry the busy sections). subdiv = how finely
+# note timing may deviate from the beat (2 = down to half-beats).
 DIFFICULTY_PRESETS = {
-    "Easy":   dict(subdiv=2, note_density=0.45, energy_thresh=0.75, max_complexity=2, min_gap=0.18),
-    "Normal": dict(subdiv=2, note_density=0.70, energy_thresh=0.72, max_complexity=3, min_gap=0.15),
-    "Hard":   dict(subdiv=4, note_density=1.00, energy_thresh=0.68, max_complexity=5, min_gap=0.12),
-    "Expert": dict(subdiv=4, note_density=1.30, energy_thresh=0.64, max_complexity=7, min_gap=0.09),
-    "Master": dict(subdiv=4, note_density=1.60, energy_thresh=0.58, max_complexity=9, min_gap=0.07),
+    "Easy":   dict(subdiv=1, note_density=0.22, energy_thresh=0.78, max_complexity=2, min_gap=0.20),
+    "Normal": dict(subdiv=1, note_density=0.32, energy_thresh=0.74, max_complexity=3, min_gap=0.17),
+    "Hard":   dict(subdiv=2, note_density=0.42, energy_thresh=0.70, max_complexity=5, min_gap=0.14),
+    "Expert": dict(subdiv=2, note_density=0.52, energy_thresh=0.66, max_complexity=7, min_gap=0.11),
+    "Master": dict(subdiv=2, note_density=0.62, energy_thresh=0.60, max_complexity=9, min_gap=0.09),
 }
 _DEFAULT_PRESET = DIFFICULTY_PRESETS["Expert"]
 
@@ -204,12 +204,13 @@ def _section_rail(start_beat, end_beat, energy, hand, preset,
         rail_type = "wave"
 
     home = 1.0 if hand == HAND_RIGHT else -1.0
-    # Start and end on the home side so the swooping modifier resolves the arm
-    # back out of any cross before the next section (no trapped X-formation).
-    sx = home * rng.uniform(0.8, 1.9)
-    ex = home * rng.uniform(0.6, 1.7)
-    sy = rng.uniform(1.0, 1.9)
-    ey = rng.uniform(1.0, 1.9)
+    # Sweep across more of the space (the modifier swings it further still), but
+    # start and end on the home side so the arm resolves out of any cross before
+    # the next section (no trapped X-formation).
+    sx = home * rng.uniform(0.7, 2.2)
+    ex = home * rng.uniform(0.6, 2.0)
+    sy = rng.uniform(0.9, 2.1)
+    ey = rng.uniform(0.9, 2.1)
     num_nodes = max(8, int((end_beat - start_beat) * 3))
 
     nodes = generate_rail(
@@ -242,12 +243,14 @@ def _place_flow_notes(diff, onsets, energy_fn, covered, track, preset,
         if _in_spans(qbeat, covered):
             continue
         e = max(0.0, min(1.0, energy_fn(t_sec)))
-        score = max(0.0, min(1.0, strength)) * (0.35 + 0.65 * e)
+        # Emphasize MAJOR beats: downbeats (bar starts) and backbeats win out
+        # over filler so we mark the music's structure, not every transient.
+        score = max(0.0, min(1.0, strength)) * (0.35 + 0.65 * e) * _beat_emphasis(qbeat)
         if qbeat not in slots or score > slots[qbeat][0]:
             slots[qbeat] = (score, track.beats_to_seconds(qbeat))
 
-    # Keep the highest-scoring slots up to the difficulty's note budget. Because
-    # score = strength x energy, choruses/drops naturally stay denser than verses.
+    # Keep the highest-scoring slots up to the (low) note budget — the strong,
+    # on-beat hits. Rails carry the dense sections; notes punctuate.
     candidates = [(b, sc, ts) for b, (sc, ts) in slots.items()]
     target = max(1, int(round(preset["note_density"] * density_scale * total_beats)))
     candidates.sort(key=lambda c: c[1], reverse=True)
@@ -266,22 +269,24 @@ def _place_flow_notes(diff, onsets, energy_fn, covered, track, preset,
         if p is not None and t_sec - p[2] < min_gap:
             continue  # per-hand cooldown — keep it humanly hittable
 
-        # Choose a target. Hands live on their home side; they cross center only
-        # occasionally, and the very next note for that hand resolves home — so
-        # the player never stays trapped in an X-formation.
+        # Choose a target that uses the WHOLE play space — full width out to the
+        # edges and the full height (low squats to overhead), not a centered
+        # huddle. Hands live on their home side, cross center only occasionally,
+        # and resolve home next note (no trapped X-formation). Because notes are
+        # sparse, there's reach to travel far between them without teleporting.
         if p is None:
-            tx = home * rng.uniform(0.8, 1.6)
-            ty = rng.uniform(1.0, 1.8)
+            tx = home * rng.uniform(0.6, 2.3)
+            ty = rng.uniform(0.8, 2.2)
         else:
             if crossed[hand]:
-                tx = home * rng.uniform(0.9, 1.8)        # resolve back home
+                tx = home * rng.uniform(0.9, 2.3)        # resolve back home
                 crossed[hand] = False
-            elif rng.random() < 0.13:
-                tx = -home * rng.uniform(0.3, 1.1)       # deliberate cross-over
+            elif rng.random() < 0.15:
+                tx = -home * rng.uniform(0.4, 1.8)       # deliberate cross-over
                 crossed[hand] = True
             else:
-                tx = home * rng.uniform(0.6, 1.9)        # sweep within home side
-            ty = min(Y_HI, max(Y_LO, p[1] + rng.uniform(-0.5, 0.5)))
+                tx = home * rng.uniform(0.5, 2.5)        # full home side, to the edge
+            ty = rng.uniform(Y_LO, Y_HI)                 # full vertical range, varied
             # Sweep toward the target, clamped to reachable distance (no
             # teleport). The 0.95 keeps a little comfort margin under the limit.
             dt = t_sec - p[2]
@@ -301,6 +306,19 @@ def _place_flow_notes(diff, onsets, energy_fn, covered, track, preset,
         prev_hand = hand
 
     return notes_added, len(kept)
+
+
+def _beat_emphasis(qbeat: float) -> float:
+    """Weight major beats over filler (assumes 4/4 with beat 0 ~ a bar start)."""
+    frac = qbeat - round(qbeat)
+    if abs(frac) > 0.02:            # off-beat / syncopation
+        return 0.55
+    bar_pos = round(qbeat) % 4
+    if bar_pos == 0:               # downbeat
+        return 1.5
+    if bar_pos == 2:               # backbeat
+        return 1.25
+    return 1.0                     # other on-beats
 
 
 def _in_spans(beat: float, spans: list[tuple[float, float]]) -> bool:
