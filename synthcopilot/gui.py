@@ -170,7 +170,35 @@ class SynthCoPilotApp(ctk.CTk):
             dropdown_fg_color=BG_FRAME, dropdown_text_color=TEXT_PRIMARY,
             dropdown_hover_color=NEON_PURPLE,
         )
-        self._hand_menu.pack(padx=16, pady=(4, 20), fill="x")
+        self._hand_menu.pack(padx=16, pady=(4, 12), fill="x")
+
+        # -- Timing (critical for "on beat"): blank = auto-detect --
+        timing_label = ctk.CTkLabel(
+            sidebar, text="TIMING  (blank = auto-detect)",
+            font=ctk.CTkFont(size=10, weight="bold"), text_color=TEXT_DIM,
+        )
+        timing_label.pack(padx=16, anchor="w")
+
+        timing_row = ctk.CTkFrame(sidebar, fg_color="transparent")
+        timing_row.pack(padx=16, pady=(4, 20), fill="x")
+        timing_row.grid_columnconfigure(1, weight=1)
+        timing_row.grid_columnconfigure(3, weight=1)
+
+        ctk.CTkLabel(timing_row, text="BPM", font=ctk.CTkFont(size=11),
+                     text_color=TEXT_DIM).grid(row=0, column=0, padx=(0, 4))
+        self._bpm_entry = ctk.CTkEntry(
+            timing_row, placeholder_text="auto", width=58,
+            fg_color=ENTRY_BG, border_color=BORDER_GLOW, text_color=TEXT_PRIMARY,
+        )
+        self._bpm_entry.grid(row=0, column=1, sticky="ew")
+
+        ctk.CTkLabel(timing_row, text="Offset", font=ctk.CTkFont(size=11),
+                     text_color=TEXT_DIM).grid(row=0, column=2, padx=(10, 4))
+        self._offset_entry = ctk.CTkEntry(
+            timing_row, placeholder_text="auto", width=58,
+            fg_color=ENTRY_BG, border_color=BORDER_GLOW, text_color=TEXT_PRIMARY,
+        )
+        self._offset_entry.grid(row=0, column=3, sticky="ew")
 
         sep2 = ctk.CTkFrame(sidebar, height=1, fg_color=BORDER_GLOW)
         sep2.pack(fill="x", padx=16, pady=(0, 16))
@@ -494,6 +522,19 @@ class SynthCoPilotApp(ctk.CTk):
             title="Folder of .synth maps to learn style from (Cancel = built-in style)"
         )
 
+        # Parse optional manual timing (read on the main thread).
+        bpm = offset = None
+        bpm_str = self._bpm_entry.get().strip()
+        off_str = self._offset_entry.get().strip()
+        try:
+            if bpm_str:
+                bpm = float(bpm_str)
+            if off_str:
+                offset = float(off_str)
+        except ValueError:
+            self.log("[ERROR] BPM/Offset must be numbers (or blank for auto).")
+            return
+
         self._generating = True
         self._btn_generate.configure(state="disabled")
         self._btn_new.configure(state="disabled", text="GENERATING...")
@@ -503,6 +544,8 @@ class SynthCoPilotApp(ctk.CTk):
             "audio": audio,
             "learn_dir": learn_dir or None,
             "difficulty": self._diff_var.get(),
+            "bpm": bpm,
+            "offset": offset,
         }
         threading.Thread(target=self._new_worker, args=(params,), daemon=True).start()
 
@@ -522,8 +565,16 @@ class SynthCoPilotApp(ctk.CTk):
                 print("Using built-in default style")
 
             self._set_progress(0.20)
-            bpm, offset = _detect_bpm(p["audio"])
-            print(f"Auto-detected BPM={bpm:.1f}, offset={offset:.3f}s")
+            if p["bpm"] is not None:
+                bpm = p["bpm"]
+                offset = p["offset"] if p["offset"] is not None else 0.0
+                print(f"Using manual BPM={bpm:.1f}, offset={offset:.3f}s")
+            else:
+                bpm, offset = _detect_bpm(p["audio"])
+                if p["offset"] is not None:
+                    offset = p["offset"]
+                print(f"Auto-detected BPM={bpm:.1f}, offset={offset:.3f}s "
+                      f"(set BPM/Offset fields to override if it's off-beat)")
 
             name = os.path.splitext(os.path.basename(p["audio"]))[0]
             track = new_track(audio_filename=os.path.basename(p["audio"]),
