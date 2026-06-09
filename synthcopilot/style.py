@@ -219,12 +219,16 @@ class StyleProfile:
         total_rails = 0
         rail_len_sum = 0.0
         maps_used = 0
+        maps_parsed = 0
+        parse_failures: list[tuple[str, str]] = []
 
         for p in paths:
             try:
                 track = load_synth(str(p))
-            except Exception:
+            except Exception as e:  # surface, don't silently swallow
+                parse_failures.append((p.name, f"{type(e).__name__}: {e}"))
                 continue
+            maps_parsed += 1
             map_had_notes = False
             for diff in track.difficulties.values():
                 notes = sorted(diff.notes, key=lambda n: n.time)
@@ -266,7 +270,20 @@ class StyleProfile:
                 maps_used += 1
 
         if total_notes == 0:
-            raise ValueError(f"Maps under {folder} contained no notes to learn from")
+            if maps_parsed == 0:
+                detail = "; ".join(f"{n} ({e})" for n, e in parse_failures[:3])
+                raise ValueError(
+                    f"None of the {len(paths)} .synth file(s) under {folder} could be "
+                    f"read by synth_mapping_helper. First errors: {detail or 'unknown'}. "
+                    f"They may be a format/version this SMH build can't parse — try "
+                    f"updating it (pip install -U synth-mapping-helper) or omit "
+                    f"--learn-from to use the built-in style."
+                )
+            raise ValueError(
+                f"Parsed {maps_parsed} of {len(paths)} map(s) under {folder}, but found "
+                f"no notes to learn from (they appear to contain only rails/walls, or an "
+                f"empty difficulty). Omit --learn-from to use the built-in style."
+            )
 
         pos_total = sum(pos_counts) or 1.0
         position_hist = [c / pos_total for c in pos_counts]
