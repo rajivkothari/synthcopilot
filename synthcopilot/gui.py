@@ -144,7 +144,7 @@ class SynthCoPilotApp(ctk.CTk):
         )
         diff_label.pack(padx=16, anchor="w")
 
-        self._diff_var = ctk.StringVar(value="Expert")
+        self._diff_var = ctk.StringVar(value="Master")
         self._diff_menu = ctk.CTkOptionMenu(
             sidebar, variable=self._diff_var,
             values=list(DIFFICULTIES),

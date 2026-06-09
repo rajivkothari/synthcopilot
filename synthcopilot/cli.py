@@ -90,10 +90,12 @@ def _detect_bpm(audio_path: str) -> tuple[float, float]:
     import numpy as np
 
     y, sr = librosa.load(audio_path, sr=None)
-    tempo, beats = librosa.beat.beat_track(y=y, sr=sr)
+    tempo, _beats = librosa.beat.beat_track(y=y, sr=sr)
     bpm = float(np.ravel(tempo)[0])  # librosa may return a 1-element array
-    beat_times = librosa.frames_to_time(beats, sr=sr)
-    offset = float(beat_times[0]) if len(beat_times) else 0.0
+    # Offset = the first real transient (downbeat); beat_track's first frame is
+    # often a beat or two in, which shifts the whole grid off the music.
+    onset_times = librosa.onset.onset_detect(y=y, sr=sr, units="time")
+    offset = float(onset_times[0]) if len(onset_times) else 0.0
     return bpm, offset
 
 
@@ -136,7 +138,7 @@ def cmd_new(args):
     summary = generate_map(
         track, args.audio, style, difficulty=args.difficulty,
         density_scale=args.density, with_rails=not args.no_rails,
-        max_hand_speed=args.max_hand_speed, min_gap=args.cooldown, seed=args.seed,
+        max_hand_speed=args.max_hand_speed, seed=args.seed,
     )
     print(f"Generated {summary['notes_added']} notes, {summary['rails_added']} rails "
           f"into {args.difficulty} "
@@ -205,13 +207,11 @@ def main():
     p_new.add_argument("--save-profile", help="Save the learned/used style profile to JSON")
     p_new.add_argument("--bpm", type=float, help="Track BPM (auto-detected if omitted)")
     p_new.add_argument("--offset", type=float, default=0.0, help="First-beat offset in seconds")
-    p_new.add_argument("--difficulty", default="Expert", help="Target difficulty (default: Expert)")
+    p_new.add_argument("--difficulty", default="Master", help="Target difficulty (default: Master)")
     p_new.add_argument("--density", type=float, default=1.0,
                         help="Scale note density vs. learned style (default: 1.0)")
-    p_new.add_argument("--cooldown", type=float, default=0.050,
-                        help="Minimum seconds between notes (default: 0.050)")
     p_new.add_argument("--max-hand-speed", type=float, default=6.0,
-                        help="Max hand speed in grid-units/sec (0 = off)")
+                        help="Max hand speed in grid-units/sec — the no-teleport limit (default: 6.0)")
     p_new.add_argument("--no-rails", action="store_true", help="Place notes only, no rails")
     p_new.add_argument("--seed", type=int, help="RNG seed for reproducible output")
     p_new.add_argument("--name", help="Map name (default: audio filename)")

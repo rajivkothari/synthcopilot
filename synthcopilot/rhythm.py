@@ -175,27 +175,42 @@ def get_audio_duration(audio_path: str) -> float:
     return float(librosa.get_duration(path=audio_path))
 
 
-def onset_strength_envelope(audio_path: str) -> tuple[np.ndarray, np.ndarray]:
-    """Compute a whole-song onset-strength envelope.
+def analyze_audio(audio_path: str, sensitivity: float = 1.0) -> dict:
+    """Single-pass whole-song analysis for the map generator.
 
-    Returns (times, strengths) where ``times`` are frame timestamps in
-    seconds and ``strengths`` is the per-frame onset strength normalized to
-    [0, 1]. Used by the map generator to decide which beat-grid slots are
-    musically "active" across an entire track.
+    Returns a dict with:
+      * ``duration``      – seconds
+      * ``onsets``        – list of (time_sec, strength in [0,1]) transient events
+      * ``energy_times``  – frame timestamps (seconds) for the energy envelope
+      * ``energies``      – per-frame RMS energy normalized to ~[0,1] (drives
+                            section dynamics: drops/choruses vs. verses)
     """
     if librosa is None:
         raise ImportError("librosa is required: pip install librosa soundfile")
 
     y, sr = librosa.load(audio_path, sr=None)
+    duration = len(y) / sr if sr else 0.0
+
     env = librosa.onset.onset_strength(y=y, sr=sr)
-    times = librosa.times_like(env, sr=sr)
+    frames = librosa.onset.onset_detect(
+        y=y, sr=sr, onset_envelope=env,
+        delta=0.07 / max(sensitivity, 0.1),
+    )
+    otimes = librosa.frames_to_time(frames, sr=sr)
     peak = float(env.max()) if env.size else 0.0
-    strengths = env / peak if peak > 0 else env
-    return times, strengths
+    onsets = [
+        (float(t), float(env[f] / peak) if peak > 0 else 0.0)
+        for t, f in zip(otimes, frames)
+    ]
 
+    rms = librosa.feature.rms(y=y)[0]
+    etimes = librosa.times_like(rms, sr=sr)
+    ref = float(np.percentile(rms, 95)) if rms.size else 0.0
+    energies = np.clip(rms / ref, 0.0, 1.0) if ref > 0 else rms
 
-def strength_at(times: np.ndarray, strengths: np.ndarray, query_sec: float) -> float:
-    """Sample the onset-strength envelope at an arbitrary timestamp (seconds)."""
-    if times.size == 0:
-        return 0.0
-    return float(np.interp(query_sec, times, strengths))
+    return {
+        "duration": duration,
+        "onsets": onsets,
+        "energy_times": etimes,
+        "energies": energies,
+    }

@@ -131,15 +131,16 @@ def test_extract_audio_yields_readable_file(click_wav, tmp_path):
 
 def test_full_generate_to_real_synth(click_wav, tmp_path):
     track = new_track(audio_filename="click.ogg", bpm=120.0, name="Gen")
-    summary = generate_map(track, click_wav, StyleProfile.default(),
-                           onset_fn=lambda s: 1.0, duration_sec=8.0, seed=1)
+    onsets = [(i * 0.1, 1.0) for i in range(80)]
+    summary = generate_map(track, None, StyleProfile.default(), difficulty="Master",
+                           onsets=onsets, duration_sec=8.0, seed=1)
     assert summary["notes_added"] > 0
 
     out = tmp_path / "Gen.synth"
     smh_io.write_synth(track, click_wav, str(out))
 
     reloaded = smh.SynthFile.from_synth(out)
-    counts = reloaded.difficulties["Expert"].get_counts()
+    counts = reloaded.difficulties["Master"].get_counts()
     total_notes = counts["notes"]["total"]
     total_rails = counts["rails"]["total"]
     assert total_notes + total_rails == summary["notes_added"] + summary["rails_added"]

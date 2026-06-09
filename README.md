@@ -71,25 +71,35 @@ In the GUI, **"New from MP3"** runs the same generator: pick an audio file,
 optionally point at a folder of existing `.synth` maps to learn the style
 from (Cancel = built-in style), and it produces a full map you can save out.
 
-## Generating a new map from scratch
+## Generating a new map (the choreographer)
 
 `new` (CLI) and "New from MP3" (GUI) build a complete beatmap from audio so
 you can then **import the `.synth` into the official Synth Riders editor and
-refine it**. The pipeline:
+refine it**. It defaults to **Master** difficulty.
 
-1. **BPM grid** — candidate note slots are laid on the beat grid (auto-detected
-   BPM, or pass `--bpm`).
-2. **Audio onset gating** — librosa onset strength decides *which* slots fire;
-   the total density is pinned to the learned `notes_per_beat`.
-3. **Markov flow** — positions are sampled from a per-hand Markov chain over a
-   quantized grid, so motion looks intentional (learned from your example maps
-   via `--learn-from`, or sensible built-in defaults).
-4. **Constraints** — per-hand reach/velocity gate and a cooldown drop
-   physically impossible placements; occasional rails are emitted per the
-   learned rail rate.
+Generation acts as a VR *choreographer*, not a beat-matcher — it prioritizes
+**sweeping geometric flow over raw note density** (`mapgen.py`):
 
-> Auto-detected BPM is a best guess (great for steady electronic tracks,
-> shakier for live/rubato music) — pass `--bpm` to override.
+1. **No teleporting.** Consecutive notes for the same hand never demand more
+   than `--max-hand-speed` grid-units/sec (default 6) of arm travel; placement
+   sweeps toward each target within reach instead of jumping.
+2. **Complexity through continuity.** High-energy sections (drops / solos,
+   found from RMS energy) are carried by long **rails** with algorithmic
+   modifiers (wave / zigzag / spiral) whose complexity scales with energy —
+   the player swoops and rides, rather than hitting note-spam.
+3. **Cross-overs that resolve.** Each hand has a home side and crosses center
+   only occasionally; the next note resolves it home so the player never stays
+   trapped in an X-formation.
+4. **On-beat timing.** Notes land on the strongest audio onsets quantized to
+   the BPM grid; the per-difficulty preset (`DIFFICULTY_PRESETS`) sets density,
+   subdivision, and rail emphasis (Master = rail-heavy, modest note density).
+
+> Get the **BPM/offset right** for on-beat results — pass `--bpm` (and
+> `--offset`) if the auto-detected values drift. Auto-detected BPM is solid for
+> steady electronic tracks, shakier for live/rubato music.
+>
+> Honest scope: this produces a strong, on-beat, *interesting starting
+> skeleton* — not a finished pro map. Polish happens in the editor.
 
 ## Testing
 
