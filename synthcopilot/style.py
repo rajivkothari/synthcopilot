@@ -271,6 +271,15 @@ class StyleProfile:
 
         if total_notes == 0:
             if maps_parsed == 0:
+                n_enc = sum(1 for _, e in parse_failures if "is encrypted" in e)
+                if n_enc == len(parse_failures) and n_enc:
+                    raise ValueError(
+                        f"All {n_enc} .synth file(s) under {folder} are encrypted "
+                        f"(protected synthriderz.com downloads) and cannot be read. "
+                        f"Learn from unencrypted maps you exported yourself from the "
+                        f"Synth Riders Beatmap Editor, or omit --learn-from to use the "
+                        f"built-in style."
+                    )
                 detail = "; ".join(f"{n} ({e})" for n, e in parse_failures[:3])
                 raise ValueError(
                     f"None of the {len(paths)} .synth file(s) under {folder} could be "

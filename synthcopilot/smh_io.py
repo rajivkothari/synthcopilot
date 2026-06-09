@@ -68,6 +68,34 @@ def _require_smh() -> None:
         )
 
 
+class EncryptedSynthError(Exception):
+    """Raised for password/AES-encrypted .synth files we won't (and can't) read."""
+
+
+def _check_readable(path: str) -> None:
+    """Reject encrypted ``.synth`` files with a clear, actionable message.
+
+    Maps published on synthriderz.com are distributed WinZip-AES-encrypted
+    (a content-protection measure on the creators' work). Neither SMH nor the
+    Python stdlib can read those, and bypassing the protection isn't something
+    this tool does. Maps you export yourself from the Synth Riders Beatmap
+    Editor are unencrypted and work fine.
+    """
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(path) as zf:
+            for zi in zf.infolist():
+                if zi.filename == "beatmap.meta.bin" and (zi.flag_bits & 0x1):
+                    raise EncryptedSynthError(
+                        f"{Path(path).name} is encrypted (a protected synthriderz.com "
+                        f"download) and cannot be read. Use an unencrypted .synth that "
+                        f"you exported yourself from the Synth Riders Beatmap Editor."
+                    )
+    except zipfile.BadZipFile:
+        pass  # not a zip — let SMH surface its own error
+
+
 def new_track(
     audio_filename: str,
     bpm: float,
@@ -163,6 +191,7 @@ def _fill_container(dc, notes, rails) -> None:
 def open_synth(path: str):
     """Open a real ``.synth`` as a held SMH SynthFile (preserves audio/meta)."""
     _require_smh()
+    _check_readable(path)
     return _sf.SynthFile.from_synth(Path(path))
 
 
