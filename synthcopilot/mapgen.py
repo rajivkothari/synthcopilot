@@ -38,13 +38,14 @@ Y_LO, Y_HI = 0.7, 2.3
 
 # Per-difficulty character. note_density = notes per beat — kept low so notes
 # fall on *major* beats (rails carry the busy sections). subdiv = how finely
-# note timing may deviate from the beat (2 = down to half-beats).
+# note timing may deviate from the beat (2 = down to half-beats). rail_coverage
+# = fraction of the song (by energy) carried by rails.
 DIFFICULTY_PRESETS = {
-    "Easy":   dict(subdiv=1, note_density=0.22, energy_thresh=0.78, max_complexity=2, min_gap=0.20),
-    "Normal": dict(subdiv=1, note_density=0.32, energy_thresh=0.74, max_complexity=3, min_gap=0.17),
-    "Hard":   dict(subdiv=2, note_density=0.42, energy_thresh=0.70, max_complexity=5, min_gap=0.14),
-    "Expert": dict(subdiv=2, note_density=0.52, energy_thresh=0.66, max_complexity=7, min_gap=0.11),
-    "Master": dict(subdiv=2, note_density=0.62, energy_thresh=0.60, max_complexity=9, min_gap=0.09),
+    "Easy":   dict(subdiv=1, note_density=0.25, rail_coverage=0.10, max_complexity=2),
+    "Normal": dict(subdiv=1, note_density=0.35, rail_coverage=0.15, max_complexity=3),
+    "Hard":   dict(subdiv=2, note_density=0.45, rail_coverage=0.20, max_complexity=5),
+    "Expert": dict(subdiv=2, note_density=0.55, rail_coverage=0.26, max_complexity=7),
+    "Master": dict(subdiv=2, note_density=0.65, rail_coverage=0.32, max_complexity=9),
 }
 _DEFAULT_PRESET = DIFFICULTY_PRESETS["Expert"]
 
@@ -120,9 +121,18 @@ def generate_map(
     rails_added = 0
     covered: list[tuple[float, float]] = []
     if with_rails and have_energy:
-        spans = _high_energy_spans(
-            energy_fn, track_data, total_beats, thresh=preset["energy_thresh"],
-        )
+        # Smooth the energy (reveals verse/chorus structure, not spiky frames),
+        # then keep the top `rail_coverage` fraction as "high energy" via an
+        # adaptive threshold — so rails appear in every song, in contiguous
+        # sections, instead of only tracks loud enough to clear a fixed bar.
+        step = 0.25
+        bs = np.arange(0.0, total_beats, step)
+        raw = np.array([energy_fn(track_data.beats_to_seconds(float(b))) for b in bs])
+        win = max(1, int(round(6.0 / step)))  # ~6-beat moving average
+        smooth = np.convolve(raw, np.ones(win) / win, mode="same")
+        thresh = float(np.percentile(smooth, 100 * (1 - preset["rail_coverage"])))
+        thresh = min(0.8, max(0.35, thresh))
+        spans = _high_energy_spans(bs, smooth, thresh=thresh)
         hand_cycle = HAND_RIGHT
         for sb, eb, energy in spans:
             rail = _section_rail(sb, eb, energy, hand_cycle, preset,
@@ -151,29 +161,26 @@ def generate_map(
 #  High-energy sections -> rails                                                #
 # --------------------------------------------------------------------------- #
 
-def _high_energy_spans(energy_fn, track, total_beats,
-                       thresh=0.6, min_beats=3.0, max_beats=8.0, step=0.25):
-    """Find sustained high-energy regions (drops/solos), in beats.
+def _high_energy_spans(beats, energy, thresh=0.6, min_beats=3.0, max_beats=8.0):
+    """Find sustained high-energy regions (drops/solos) from a smoothed array.
 
-    Samples ``energy_fn`` along the beat timeline so it works identically for
-    real audio and injected test energy.
+    ``beats``/``energy`` are parallel arrays (beat position, energy in [0,1]).
     """
     spans = []
     in_span = False
     start = 0.0
     acc: list[float] = []
-    beat = 0.0
-    while beat < total_beats:
-        e = energy_fn(track.beats_to_seconds(beat))
+    total_beats = float(beats[-1]) if len(beats) else 0.0
+    for b, e in zip(beats, energy):
+        b = float(b)
         if e >= thresh:
             if not in_span:
-                in_span, start, acc = True, beat, []
+                in_span, start, acc = True, b, []
             acc.append(float(e))
         elif in_span:
             in_span = False
-            if beat - start >= min_beats:
-                spans.append((start, beat, float(np.mean(acc))))
-        beat += step
+            if b - start >= min_beats:
+                spans.append((start, b, float(np.mean(acc))))
     if in_span and total_beats - start >= min_beats:
         spans.append((start, total_beats, float(np.mean(acc or [thresh]))))
 
@@ -230,9 +237,8 @@ def _section_rail(start_beat, end_beat, energy, hand, preset,
 
 def _place_flow_notes(diff, onsets, energy_fn, covered, track, preset,
                       density_scale, max_hand_speed, total_beats, rng):
-    """Place notes on the strongest onsets as a continuous, reachable sweep."""
+    """Place notes evenly on the strongest beats as a continuous, reachable sweep."""
     subdiv = preset["subdiv"]
-    min_gap = preset["min_gap"]
 
     # Quantize onsets to the grid, dedupe per slot keeping the strongest, and
     # drop anything already carried by a rail.
@@ -249,12 +255,24 @@ def _place_flow_notes(diff, onsets, energy_fn, covered, track, preset,
         if qbeat not in slots or score > slots[qbeat][0]:
             slots[qbeat] = (score, track.beats_to_seconds(qbeat))
 
-    # Keep the highest-scoring slots up to the (low) note budget — the strong,
-    # on-beat hits. Rails carry the dense sections; notes punctuate.
-    candidates = [(b, sc, ts) for b, (sc, ts) in slots.items()]
-    target = max(1, int(round(preset["note_density"] * density_scale * total_beats)))
-    candidates.sort(key=lambda c: c[1], reverse=True)
-    kept = sorted(candidates[:target], key=lambda c: c[0])
+    # Select EVENLY across time: slide a window of `spacing` beats and take the
+    # strongest beat in each. This keeps a steady cadence everywhere — no long
+    # empty stretches in quiet sections, no clumping in loud ones.
+    candidates = sorted((b, sc, ts) for b, (sc, ts) in slots.items())
+    density = max(1e-6, preset["note_density"] * density_scale)
+    spacing = 1.0 / density
+    kept: list[tuple[float, float, float]] = []
+    i = 0
+    w = candidates[0][0] if candidates else 0.0
+    while candidates and w < total_beats:
+        best = None
+        while i < len(candidates) and candidates[i][0] < w + spacing:
+            if best is None or candidates[i][1] > best[1]:
+                best = candidates[i]
+            i += 1
+        if best is not None:
+            kept.append(best)
+        w += spacing
 
     notes_added = 0
     prev_hand = HAND_LEFT
@@ -262,12 +280,10 @@ def _place_flow_notes(diff, onsets, energy_fn, covered, track, preset,
     crossed: dict[int, bool] = {HAND_RIGHT: False, HAND_LEFT: False}
 
     for beat, _score, t_sec in kept:
-        hand = HAND_RIGHT if prev_hand == HAND_LEFT else HAND_LEFT  # alternate hands
+        # Strict alternation per *placed* note — no skips that could double a hand.
+        hand = HAND_RIGHT if prev_hand == HAND_LEFT else HAND_LEFT
         home = 1.0 if hand == HAND_RIGHT else -1.0
         p = pos[hand]
-
-        if p is not None and t_sec - p[2] < min_gap:
-            continue  # per-hand cooldown — keep it humanly hittable
 
         # Choose a target that uses the WHOLE play space — full width out to the
         # edges and the full height (low squats to overhead), not a centered
