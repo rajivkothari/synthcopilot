@@ -92,6 +92,13 @@ def _detect_bpm(audio_path: str) -> tuple[float, float]:
     y, sr = librosa.load(audio_path, sr=None)
     tempo, _beats = librosa.beat.beat_track(y=y, sr=sr)
     bpm = float(np.ravel(tempo)[0])  # librosa may return a 1-element array
+    # Octave correction: librosa very often locks onto half- (or double-) tempo
+    # (e.g. an uptempo 136 read as 68). Bias toward the 100-190 BPM band that
+    # most mappable music lives in. Override in the GUI/CLI if it's still wrong.
+    if bpm < 100:
+        bpm *= 2.0
+    elif bpm > 190:
+        bpm /= 2.0
     # Offset = the first real transient (downbeat); beat_track's first frame is
     # often a beat or two in, which shifts the whole grid off the music.
     onset_times = librosa.onset.onset_detect(y=y, sr=sr, units="time")
