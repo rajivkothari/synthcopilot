@@ -51,15 +51,7 @@ NOTE_X_INNER, NOTE_X_OUTER = 0.7, 3.6   # bass central -> lead outward
 MAX_RAIL_BEATS = 2.0                     # never a longer loop (no washing machine)
 QUAD_X_MIN = 1.6                         # stay out of the cramped center box
 
-# Per-phrase stance: each hand -> (x_side, high?). Negative side = grid-left.
-# CROSSED stances send a hand to the OPPOSITE side (held a full phrase), and
-# Superman stances split the hands to extreme opposite high/low corners.
-PHRASE_STANCES = [
-    {HAND_LEFT: (-1.0, False), HAND_RIGHT: (1.0, True)},    # open: L low-left, R high-right
-    {HAND_LEFT: (1.0, True),   HAND_RIGHT: (-1.0, False)},  # CROSSED + Superman
-    {HAND_LEFT: (-1.0, True),  HAND_RIGHT: (1.0, False)},   # open inverted
-    {HAND_LEFT: (1.0, False),  HAND_RIGHT: (-1.0, True)},   # CROSSED inverted
-]
+# Phrase planning (sections, grammar, motifs) lives in synthcopilot.phrases.
 
 # Per-difficulty character. note_density = notes per beat on major beats (rails
 # carry the busy sections). rail_coverage = fraction of song carried by rails.
@@ -170,6 +162,11 @@ def generate_map(
     def intensity_at(beat: float) -> float:
         return section_iv[min(int(beat // 32.0), len(section_iv) - 1)] if section_iv else 5.0
 
+    # --- B. Phrase map: sections, grammar, motifs ------------------------ #
+    from synthcopilot.phrases import build_phrase_map, phrase_at
+
+    phrases = build_phrase_map(section_iv, seed=seed or 0)
+
     # No audio onsets -> synthesize a plain beat grid so it still produces output.
     if not onsets:
         onsets = [(track_data.beats_to_seconds(float(b)), 1.0)
@@ -201,6 +198,10 @@ def generate_map(
         spans = _high_energy_spans(bs, smooth, thresh=thresh)
         hand_cycle = HAND_RIGHT
         for sb, eb, energy in spans:
+            # Rails belong to phrases whose grammar allows them (builds,
+            # choruses, breakdowns) — verses keep a clean note groove.
+            if not phrase_at(phrases, sb).rails:
+                continue
             # NO WASHING MACHINE: a harmonic section is broken into SHORT rails
             # (<= 2 beats) separated by rests, alternating hands, with angular
             # modifiers — never one long continuous spiral.
@@ -221,10 +222,10 @@ def generate_map(
                 # Advance past the rail plus a rest gap (negative space).
                 seg = seg_end + rng.uniform(0.5, 1.5)
 
-    # --- Notes ride percussive transients, positioned by frequency ------ #
+    # --- Notes ride percussive transients, planned per phrase ----------- #
     notes_added, onsets_kept = _place_flow_notes(
-        diff, onsets, snares, centroid_fn, intensity_at, covered, track_data,
-        preset, density_scale, max_speed_grid, total_beats, rng,
+        diff, onsets, snares, centroid_fn, intensity_at, phrases, covered,
+        track_data, preset, density_scale, max_speed_grid, total_beats, rng,
     )
 
     return {
@@ -232,27 +233,26 @@ def generate_map(
         "rails_added": rails_added,
         "onsets_kept": onsets_kept,
         "audio_used": audio_used,
-        "intent": _choreography_intent(section_iv),
+        "phrases": phrases,
+        "intent": _choreography_intent(phrases),
     }
 
 
-def _choreography_intent(section_iv: list[float]) -> list[dict]:
-    """Per-8-bar Choreography Intent Block: hand layer assignment, weight-shift
-    vector, and the loop-length verification."""
+def _choreography_intent(phrases) -> list[dict]:
+    """Per-phrase Choreography Intent Block: section, pattern family, motif
+    stance, hand assignment, and the loop-length verification."""
     blocks = []
-    for i, iv in enumerate(section_iv):
-        stance = PHRASE_STANCES[i % len(PHRASE_STANCES)]
-        ls, lhigh = stance[HAND_LEFT]
-        rs, rhigh = stance[HAND_RIGHT]
-        crossed = ls > 0  # Left hand on the right side = held cross-body
+    for ph in phrases:
+        ls, lhigh = ph.stance[HAND_LEFT]
+        rs, rhigh = ph.stance[HAND_RIGHT]
         left = f"{'top' if lhigh else 'floor'} {'RIGHT (crossed)' if ls > 0 else 'left'}"
         right = f"{'top' if rhigh else 'floor'} {'LEFT (crossed)' if rs < 0 else 'right'}"
-        vector = "CROSS-BODY hold (arms swap sides)" if crossed \
-            else "open weight-shift L<->R"
-        tier = ("chorus/drop" if iv > 7 else "build/mid" if iv > 4 else "verse/breakdown")
+        vector = "CROSS-BODY hold" if ls > 0 else "open weight-shift L<->R"
         blocks.append({
-            "section": i + 1, "bars": f"{i * 8 + 1}-{i * 8 + 8}",
-            "intensity": round(iv, 1), "tier": tier,
+            "section": ph.index + 1, "bars": f"{ph.index * 8 + 1}-{ph.index * 8 + 8}",
+            "intensity": round(ph.intensity, 1), "tier": ph.label,
+            "family": ph.family, "motif": ph.stance_name,
+            "occurrence": ph.occurrence + 1,
             "left_hand": left, "right_hand": right, "weight_shift": vector,
             "max_loop_beats": MAX_RAIL_BEATS,
         })
@@ -366,8 +366,9 @@ def _section_intensities(intensity_fn, track, total_beats, chunk_beats=32.0):
     return scaled.tolist()
 
 
-def _place_flow_notes(diff, onsets, snares, centroid_fn, intensity_at, covered,
-                      track, preset, density_scale, max_hand_speed, total_beats, rng):
+def _place_flow_notes(diff, onsets, snares, centroid_fn, intensity_at, phrases,
+                      covered, track, preset, density_scale, max_hand_speed,
+                      total_beats, rng):
     """Place notes on percussive transients, positioned by FREQUENCY and scaled
     by sectional INTENSITY (rubber-band: tight verses, expansive choruses).
 
@@ -388,54 +389,64 @@ def _place_flow_notes(diff, onsets, snares, centroid_fn, intensity_at, covered,
                     shatter_beats.add(qb)
 
     # Quantize onsets to the grid, dedupe per slot keeping the strongest, and
-    # drop anything already carried by a rail.
+    # drop anything already carried by a rail. The phrase's MOTIF rhythm
+    # signature boosts its slots so the same rhythmic figure recurs every
+    # phrase of that label — repetition the player can learn.
+    from synthcopilot.phrases import phrase_at
+
     slots: dict[float, tuple[float, float]] = {}
     for t_sec, strength in onsets:
         beat = max(0.0, track.seconds_to_beats(t_sec))
         qbeat = round(beat * subdiv) / subdiv
         if _in_spans(qbeat, covered):
             continue
-        # Emphasize MAJOR beats: downbeats (bar starts) and backbeats win out
-        # over filler so we mark the music's structure, not every transient.
-        score = max(0.0, min(1.0, strength)) * _beat_emphasis(qbeat)
+        ph = phrase_at(phrases, qbeat)
+        motif_bonus = 1.5 if any(abs((qbeat % 4.0) - m) < 0.13 for m in ph.rhythm) else 1.0
+        score = max(0.0, min(1.0, strength)) * _beat_emphasis(qbeat) * motif_bonus
         if qbeat not in slots or score > slots[qbeat][0]:
             slots[qbeat] = (score, track.beats_to_seconds(qbeat))
 
-    # Select PER BAR on the strongest hits, so notes land on the song's groove
-    # (kick/snare accents) and follow the rhythm — not a metronomic fixed cadence
-    # — while still spreading evenly (every bar gets its share, none starved).
+    # Select PER BAR on the strongest hits — but the note budget is the
+    # PHRASE's: verses groove at medium density, intros establish sparsely,
+    # builds RAMP upward bar by bar, choruses peak. Intensity follows energy.
     candidates = sorted((b, sc, ts) for b, (sc, ts) in slots.items())
-    density = max(1e-6, preset["note_density"] * density_scale)
-    bar = 4.0  # beats
-    per_bar = max(1, int(round(density * bar)))
+    base_per_bar = preset["note_density"] * density_scale * 4.0
     by_bar: dict[int, list[tuple[float, float, float]]] = {}
     for c in candidates:
-        by_bar.setdefault(int(c[0] // bar), []).append(c)
+        by_bar.setdefault(int(c[0] // 4.0), []).append(c)
     kept: list[tuple[float, float, float]] = []
     for b_idx in sorted(by_bar):
+        bar_beat = b_idx * 4.0
+        ph = phrase_at(phrases, bar_beat)
+        factor = ph.density
+        if ph.ramp:  # build: density climbs across the phrase toward the drop
+            pos_in = (bar_beat - ph.start_beat) / max(ph.end_beat - ph.start_beat, 1e-6)
+            factor *= 0.6 + 0.8 * pos_in
+        per_bar = max(1, int(round(base_per_bar * factor)))
         top = sorted(by_bar[b_idx], key=lambda c: c[1], reverse=True)[:per_bar]
         kept.extend(sorted(top, key=lambda c: c[0]))
     kept.sort(key=lambda c: c[0])
 
-    # --- Phrase-level stance placement: cross-body + max amplitude ------- #
-    # Each 8-bar phrase picks a STANCE (PHRASE_STANCES) assigning each hand a
-    # side (left/right, which may be CROSSED) and a height band. The stance is
-    # held the whole phrase, so the player commits to a full cross-body / Superman
-    # posture rather than twitching back to center. Cycling stances guarantees
-    # every hand visits both sides of the grid across the song.
+    # --- Phrase-stance placement: the motif's posture, held all phrase --- #
+    # The phrase plan supplies the stance (which may be a held CROSS-BODY or
+    # Superman split) and how wide the motif spreads; later choruses evolve
+    # wider via spread_boost. The same label always moves the same way.
     notes_added = 0
     prev_hand = HAND_LEFT
     pos: dict[int, tuple[float, float, float] | None] = {HAND_RIGHT: None, HAND_LEFT: None}
 
     for beat, _score, t_sec in kept:
+        ph = phrase_at(phrases, beat)
         iv = intensity_at(beat)
-        spread = 0.30 + 0.70 * (iv - 1.0) / 9.0      # tight verse .. wide chorus
+        spread = 0.30 + 0.70 * (iv - 1.0) / 9.0 + ph.spread_boost
+        spread = min(spread, 1.0)
         b = max(0.0, min(1.0, centroid_fn(t_sec)))    # brightness
-        stance = PHRASE_STANCES[int(beat // 32.0) % len(PHRASE_STANCES)]
+        stance = ph.stance
 
         # SNARE SHATTER: both hands hit together. Alternately fling apart (blast)
         # or CROSS (Right target left of Left target) for a dramatic arm-cross.
-        if beat in shatter_beats and iv > 4.5:
+        # Only in phrases whose grammar calls for accents (builds/choruses).
+        if beat in shatter_beats and ph.shatters:
             ty = 1.0 + 2.0 * b
             cross = (round(beat) % 2 == 0)            # color-swap crossed shatter
             mag2 = 2.4 + 1.2 * spread

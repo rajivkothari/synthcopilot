@@ -89,15 +89,20 @@ def test_no_center_gravity():
     assert xs.max() > 2.0 and xs.min() < -2.0, "not using the full wingspan"
 
 
+def _verse_chorus_intensity(sec: float) -> float:
+    """A song with structure: quiet verse phrases alternating with loud
+    choruses (32 beats = 16 s at 120 bpm per phrase)."""
+    phrase = int(sec // 16.0)
+    return 0.95 if phrase % 2 == 1 else 0.25
+
+
 def test_grid_amplitude_check_cross_body():
-    """The user's amplitude check: Left hand MUST reach the right side and
-    Right hand MUST reach the left side somewhere (held cross-overs)."""
-    import numpy as np
+    """Amplitude check: Left hand reaches the right side and Right hand the
+    left side during chorus phrases (held cross-over stances)."""
     track = _track()
-    # >2 phrases so the crossed stances are exercised.
     generate_map(track, None, StyleProfile.default(), difficulty="Master",
-                 onsets=_dense_onsets(80.0, 0.1), duration_sec=80.0,
-                 intensity_fn=lambda s: 0.8, seed=5)
+                 onsets=_dense_onsets(160.0, 0.1), duration_sec=160.0,
+                 intensity_fn=_verse_chorus_intensity, seed=0)
     notes = track.difficulties["Master"].notes
     left_x = [n.x for n in notes if n.hand_type == 1]   # HAND_LEFT
     right_x = [n.x for n in notes if n.hand_type == 0]  # HAND_RIGHT
@@ -110,9 +115,10 @@ def test_macro_rails_span_wide():
     import numpy as np
     track = _track()
     def energy(sec):
-        return 0.9 if 40 < sec * 2.0 < 120 else 0.2
+        return 0.95 if 32 <= sec * 2.0 < 128 else 0.2
     generate_map(track, None, StyleProfile.default(), difficulty="Master",
-                 onsets=_dense_onsets(80.0), energy_fn=energy, duration_sec=80.0,
+                 onsets=_dense_onsets(80.0), energy_fn=energy,
+                 intensity_fn=energy, duration_sec=80.0,
                  centroid_fn=lambda s: 0.6, seed=7)
     rails = track.difficulties["Master"].rails
     assert rails, "expected rails"
@@ -157,19 +163,19 @@ def test_master_is_denser_than_easy():
 
 def test_rails_appear_in_high_energy_sections():
     track = _track()
-    # Energy high in the middle third -> a drop/solo that should become rails.
+    # Energy high in the second phrase -> a chorus that should carry rails.
     def energy(sec):
         beat = sec * 2.0  # bpm 120
-        return 0.9 if 40 < beat < 70 else 0.2
+        return 0.95 if 32 <= beat < 64 else 0.2
     summary = generate_map(track, None, StyleProfile.default(), difficulty="Master",
                            onsets=_dense_onsets(60.0), energy_fn=energy,
-                           duration_sec=60.0, seed=7)
+                           intensity_fn=energy, duration_sec=60.0, seed=7)
     assert summary["rails_added"] > 0
     assert len(track.difficulties["Master"].rails) == summary["rails_added"]
-    # Rails should sit in the high-energy beat window.
+    # Rails should sit in the high-energy (chorus) phrase window.
     for r in track.difficulties["Master"].rails:
         start = r.nodes[0].time
-        assert 38 <= start <= 72
+        assert 30 <= start <= 66
 
 
 def test_no_rails_flag():
