@@ -85,8 +85,12 @@ def test_no_center_gravity():
                  onsets=_dense_onsets(40.0, 0.1), duration_sec=40.0,
                  intensity_fn=lambda s: 0.9, seed=4)
     xs = np.array([n.x for n in track.difficulties["Master"].notes])
-    assert np.mean(np.abs(xs) >= 1.0) > 0.85, "too many notes clustered center"
-    assert xs.max() > 2.0 and xs.min() < -2.0, "not using the full wingspan"
+    ys = np.array([n.y for n in track.difficulties["Master"].notes])
+    # No cramped huddle: few notes in the central box, and big mean amplitude.
+    center_box = np.mean((np.abs(xs) < 1.0) & (ys > 1.5) & (ys < 2.5))
+    assert center_box < 0.15, f"center huddle: {center_box:.0%}"
+    assert np.mean(np.abs(xs)) > 1.5, "movement amplitude too small"
+    assert xs.max() > 2.5 and xs.min() < -2.5, "not using the full wingspan"
 
 
 def _verse_chorus_intensity(sec: float) -> float:

@@ -28,8 +28,7 @@ from typing import Callable
 
 import numpy as np
 
-from synthcopilot.geometry import generate_rail
-from synthcopilot.models import HAND_LEFT, HAND_RIGHT, Note, Rail, TrackData
+from synthcopilot.models import HAND_LEFT, HAND_RIGHT, Note, Rail, RailNode, TrackData
 from synthcopilot.style import StyleProfile
 
 # -- Real Synth Riders scale (from synth_mapping_helper's reference values) --
@@ -57,11 +56,11 @@ QUAD_X_MIN = 1.6                         # stay out of the cramped center box
 # carry the busy sections). rail_coverage = fraction of song carried by rails.
 # max_complexity = ceiling on rail modifier intensity.
 DIFFICULTY_PRESETS = {
-    "Easy":   dict(subdiv=1, note_density=0.25, rail_coverage=0.10, max_complexity=2),
-    "Normal": dict(subdiv=1, note_density=0.35, rail_coverage=0.15, max_complexity=3),
-    "Hard":   dict(subdiv=2, note_density=0.45, rail_coverage=0.20, max_complexity=5),
-    "Expert": dict(subdiv=2, note_density=0.55, rail_coverage=0.26, max_complexity=7),
-    "Master": dict(subdiv=2, note_density=0.65, rail_coverage=0.32, max_complexity=9),
+    "Easy":   dict(subdiv=1, note_density=0.30, rail_coverage=0.10, max_complexity=2),
+    "Normal": dict(subdiv=1, note_density=0.45, rail_coverage=0.15, max_complexity=3),
+    "Hard":   dict(subdiv=2, note_density=0.60, rail_coverage=0.20, max_complexity=5),
+    "Expert": dict(subdiv=2, note_density=0.80, rail_coverage=0.26, max_complexity=7),
+    "Master": dict(subdiv=2, note_density=1.00, rail_coverage=0.32, max_complexity=9),
 }
 _DEFAULT_PRESET = DIFFICULTY_PRESETS["Expert"]
 
@@ -163,7 +162,7 @@ def generate_map(
         return section_iv[min(int(beat // 32.0), len(section_iv) - 1)] if section_iv else 5.0
 
     # --- B. Phrase map: sections, grammar, motifs ------------------------ #
-    from synthcopilot.phrases import build_phrase_map, phrase_at
+    from synthcopilot.phrases import build_phrase_map
 
     phrases = build_phrase_map(section_iv, seed=seed or 0)
 
@@ -173,20 +172,18 @@ def generate_map(
                   for b in range(int(total_beats))]
 
     rng = random.Random(seed)
-    sec_per_beat = 60.0 / track_data.bpm
     max_speed_grid = max_hand_speed / METERS_PER_GRID  # m/s -> grid-units/s
-    # Rail node-to-node clamp (grid/beat), with headroom so the bidirectional
-    # blend can't overshoot the max_hand_speed ceiling.
-    max_vel_per_beat = max_speed_grid * sec_per_beat * 0.82
 
-    # --- Rails carry the sustained HARMONIC sections (melodic lines) ----- #
+    # --- Rails are SEGMENTS OF THE HAND PATH on sustained harmonic music -- #
+    # The hand's continuous choreography path (paths.py) carries the notes;
+    # during sustained melodic moments the same path is *emitted* as a rail,
+    # so rails connect into the surrounding notes by construction — and while
+    # one hand rides a rail, the other keeps tapping (counterpoint).
+    from synthcopilot.paths import make_path
+
     rails_added = 0
-    covered: list[tuple[float, float]] = []
+    rail_windows: list[tuple[float, float, int]] = []   # (start, end, hand)
     if with_rails and have_energy:
-        # Use harmonic (sustained/melodic) energy, smoothed to reveal section
-        # structure, and keep the top `rail_coverage` fraction as rail-worthy.
-        # The rail's modifier reflects how much the pitch moves (centroid
-        # variation = vibrato/pitch-bends -> wave/spiral).
         step = 0.25
         bs = np.arange(0.0, total_beats, step)
         secs = [track_data.beats_to_seconds(float(b)) for b in bs]
@@ -196,35 +193,37 @@ def generate_map(
         thresh = float(np.percentile(smooth, 100 * (1 - preset["rail_coverage"])))
         thresh = min(0.8, max(0.35, thresh))
         spans = _high_energy_spans(bs, smooth, thresh=thresh)
-        hand_cycle = HAND_RIGHT
-        for sb, eb, energy in spans:
-            # Rails belong to phrases whose grammar allows them (builds,
-            # choruses, breakdowns) — verses keep a clean note groove.
-            if not phrase_at(phrases, sb).rails:
-                continue
-            # NO WASHING MACHINE: a harmonic section is broken into SHORT rails
-            # (<= 2 beats) separated by rests, alternating hands, with angular
-            # modifiers — never one long continuous spiral.
-            seg = sb
-            while seg + 1.0 <= eb:
-                seg_end = min(seg + MAX_RAIL_BEATS, eb)
-                cs = [centroid_fn(track_data.beats_to_seconds(b))
-                      for b in np.linspace(seg, seg_end, 6)]
-                pitch_motion = float(np.std(cs))
-                pitch_dir = 1.0 if cs[-1] >= cs[0] else -1.0  # rising vs falling line
-                rail = _section_rail(seg, seg_end, energy, pitch_motion, pitch_dir,
-                                     hand_cycle, preset, max_vel_per_beat, rng)
-                if rail is not None:
-                    diff.rails.append(rail)
-                    rails_added += 1
-                    covered.append((seg, seg_end))
-                    hand_cycle = HAND_LEFT if hand_cycle == HAND_RIGHT else HAND_RIGHT
-                # Advance past the rail plus a rest gap (negative space).
-                seg = seg_end + rng.uniform(0.5, 1.5)
 
-    # --- E. Notes ride percussive transients, planned per phrase -------- #
+        hand_cycle = HAND_RIGHT
+        for ph in phrases:
+            if not ph.rails:
+                continue
+            spread = min(0.30 + 0.70 * (ph.intensity - 1.0) / 9.0 + ph.spread_boost, 1.0)
+            # Rail windows aligned to the path's center-crossing (its fastest,
+            # widest sweep), one per 8 beats, only where the music sustains.
+            w = ph.start_beat + 3.0
+            while w + MAX_RAIL_BEATS <= min(ph.end_beat, total_beats):
+                we = w + MAX_RAIL_BEATS
+                if any(s < we and w < e for s, e, _m in spans):
+                    path = make_path(ph, hand_cycle, spread)
+                    home = 1.0 if hand_cycle == HAND_RIGHT else -1.0
+                    nodes = []
+                    b = w
+                    while b <= we + 1e-9:
+                        x, y = path(b)
+                        x, y = _clamp_playable(x, y, home)
+                        nodes.append(RailNode(time=round(b, 4),
+                                              x=round(x, 4), y=round(y, 4)))
+                        b += 0.25
+                    diff.rails.append(Rail(hand_type=hand_cycle, nodes=nodes))
+                    rails_added += 1
+                    rail_windows.append((w, we, hand_cycle))
+                    hand_cycle = HAND_LEFT if hand_cycle == HAND_RIGHT else HAND_RIGHT
+                w += 8.0
+
+    # --- E. Notes ride percussive transients ALONG the hand paths -------- #
     notes_added, onsets_kept = _place_flow_notes(
-        diff, onsets, snares, centroid_fn, intensity_at, phrases, covered,
+        diff, onsets, snares, centroid_fn, intensity_at, phrases, rail_windows,
         track_data, preset, density_scale, max_speed_grid, total_beats, rng,
     )
 
@@ -308,52 +307,6 @@ def _high_energy_spans(beats, energy, thresh=0.6, min_beats=3.0, max_beats=8.0):
     return out
 
 
-def _section_rail(start_beat, end_beat, energy, pitch_motion, pitch_dir, hand,
-                  preset, max_vel_per_beat, rng) -> Rail | None:
-    """A SHORT (<= 2 beat) rail that steps with the line's pitch — never a
-    continuous spiral. ``pitch_motion`` (centroid std) picks the angularity;
-    ``pitch_dir`` (+1 rising / -1 falling) sets the climb direction.
-    """
-    length = end_beat - start_beat
-    if length < 0.75:
-        return None
-    expressiveness = min(1.0, energy * 0.6 + pitch_motion * 2.5)
-    complexity = max(1, int(round(expressiveness * preset["max_complexity"])))
-    # NO SPIRALS. Moving lines step (staircase), busy lines zigzag, steady glide.
-    if pitch_motion > 0.12:
-        rail_type = "staircase"
-    elif pitch_motion > 0.05:
-        rail_type = "zigzag"
-    else:
-        rail_type = "wave"
-
-    # MACRO-RAIL: a giant pendulum sweep across the WHOLE grid (>= 4 units),
-    # crossing the center line — a theatrical arm swing, not a wiggle in place.
-    diag = 1.0 if rng.random() < 0.5 else -1.0
-    sx = -3.2 * diag * rng.uniform(0.85, 1.0)
-    ex = 3.2 * diag * rng.uniform(0.85, 1.0)        # opposite extreme -> spans ~6 units
-    if pitch_dir >= 0:
-        sy, ey = rng.uniform(-0.2, 1.3), rng.uniform(2.6, 3.9)   # climb
-    else:
-        sy, ey = rng.uniform(2.6, 3.9), rng.uniform(-0.2, 1.3)   # descend
-    num_nodes = max(8, int(length * 6))
-
-    nodes = generate_rail(
-        start=(sx, sy, start_beat),
-        end=(ex, ey, end_beat),
-        num_nodes=num_nodes,
-        rail_type=rail_type,
-        complexity=complexity,
-        max_velocity=max_vel_per_beat,  # geometry clamps to no-teleport speed
-    )
-    # The game's coordinate math degrades past ~±4.7 grid (SMH's spiral apex);
-    # clamp modifier overshoot into the safe envelope.
-    for nd in nodes:
-        nd.x = min(4.5, max(-4.5, nd.x))
-        nd.y = min(Y_HI, max(Y_LO, nd.y))
-    return Rail(hand_type=hand, nodes=nodes)
-
-
 # --------------------------------------------------------------------------- #
 #  Velocity-clamped, home-resolving note flow                                  #
 # --------------------------------------------------------------------------- #
@@ -376,15 +329,14 @@ def _section_intensities(intensity_fn, track, total_beats, chunk_beats=32.0):
 
 
 def _place_flow_notes(diff, onsets, snares, centroid_fn, intensity_at, phrases,
-                      covered, track, preset, density_scale, max_hand_speed,
+                      rail_windows, track, preset, density_scale, max_hand_speed,
                       total_beats, rng):
-    """Place notes on percussive transients, positioned by FREQUENCY and scaled
-    by sectional INTENSITY (rubber-band: tight verses, expansive choruses).
+    """Place notes ON the hand's choreography path at the phrase's rhythm.
 
-    Brightness (``centroid_fn``) sets the target zone; the section's intensity
-    vector (1..10) scales how far that zone spreads from center. Strong snare
-    hits become dual-note "shatters" that fling both hands apart. Every target
-    is clamped to the hard reach limit, so it stays physically playable.
+    Each hand follows a continuous path (paths.py); notes are waypoints along
+    it, so consecutive hits trace a deliberate line — choreography, not
+    scatter. While one hand rides a rail, the OTHER taps (counterpoint).
+    Brightness nudges height; snare shatters fire both paths at once.
     """
     subdiv = preset["subdiv"]
     # Strong snare beats -> dual-note shatters (quantized, top half by strength).
@@ -394,21 +346,18 @@ def _place_flow_notes(diff, onsets, snares, centroid_fn, intensity_at, phrases,
         for t_sec, strength in snares:
             if strength / smax >= 0.55:
                 qb = round(track.seconds_to_beats(t_sec) * subdiv) / subdiv
-                if not _in_spans(qb, covered):
-                    shatter_beats.add(qb)
+                shatter_beats.add(qb)
 
-    # Quantize onsets to the grid, dedupe per slot keeping the strongest, and
-    # drop anything already carried by a rail. The phrase's MOTIF rhythm
-    # signature boosts its slots so the same rhythmic figure recurs every
-    # phrase of that label — repetition the player can learn.
+    # Quantize onsets to the grid, dedupe per slot keeping the strongest. The
+    # phrase's MOTIF rhythm signature boosts its slots so the same rhythmic
+    # figure recurs every phrase of that label — repetition the player learns.
+    from synthcopilot.paths import make_path
     from synthcopilot.phrases import phrase_at
 
     slots: dict[float, tuple[float, float]] = {}
     for t_sec, strength in onsets:
         beat = max(0.0, track.seconds_to_beats(t_sec))
         qbeat = round(beat * subdiv) / subdiv
-        if _in_spans(qbeat, covered):
-            continue
         ph = phrase_at(phrases, qbeat)
         motif_bonus = 1.5 if any(abs((qbeat % 4.0) - m) < 0.13 for m in ph.rhythm) else 1.0
         score = max(0.0, min(1.0, strength)) * _beat_emphasis(qbeat) * motif_bonus
@@ -432,38 +381,42 @@ def _place_flow_notes(diff, onsets, snares, centroid_fn, intensity_at, phrases,
             pos_in = (bar_beat - ph.start_beat) / max(ph.end_beat - ph.start_beat, 1e-6)
             factor *= 0.6 + 0.8 * pos_in
         per_bar = max(1, int(round(base_per_bar * factor)))
+        if ph.ramp and bar_beat + 4.0 >= ph.end_beat - 1e-6:
+            per_bar += 2  # phrase-end fill into the drop
         top = sorted(by_bar[b_idx], key=lambda c: c[1], reverse=True)[:per_bar]
         kept.extend(sorted(top, key=lambda c: c[0]))
     kept.sort(key=lambda c: c[0])
 
-    # --- Phrase-stance placement: the motif's posture, held all phrase --- #
-    # The phrase plan supplies the stance (which may be a held CROSS-BODY or
-    # Superman split) and how wide the motif spreads; later choruses evolve
-    # wider via spread_boost. The same label always moves the same way.
+    # --- Notes ride the choreography paths ------------------------------- #
     notes_added = 0
     prev_hand = HAND_LEFT
     pos: dict[int, tuple[float, float, float] | None] = {HAND_RIGHT: None, HAND_LEFT: None}
+    path_cache: dict[tuple[int, int], object] = {}
+
+    def hand_path(ph, hand, spread):
+        key = (ph.index, hand)
+        if key not in path_cache:
+            path_cache[key] = make_path(ph, hand, spread)
+        return path_cache[key]
 
     for beat, _score, t_sec in kept:
         ph = phrase_at(phrases, beat)
         iv = intensity_at(beat)
-        spread = 0.30 + 0.70 * (iv - 1.0) / 9.0 + ph.spread_boost
-        spread = min(spread, 1.0)
+        spread = min(0.30 + 0.70 * (iv - 1.0) / 9.0 + ph.spread_boost, 1.0)
         b = max(0.0, min(1.0, centroid_fn(t_sec)))    # brightness
-        stance = ph.stance
 
-        # SNARE SHATTER: both hands hit together. Alternately fling apart (blast)
-        # or CROSS (Right target left of Left target) for a dramatic arm-cross.
-        # Only in phrases whose grammar calls for accents (builds/choruses).
-        if beat in shatter_beats and ph.shatters:
-            ty = 1.0 + 2.0 * b
-            cross = (round(beat) % 2 == 0)            # color-swap crossed shatter
-            mag2 = 2.4 + 1.2 * spread
-            placements = ((HAND_LEFT, mag2), (HAND_RIGHT, -mag2)) if cross \
-                else ((HAND_LEFT, -mag2), (HAND_RIGHT, mag2))
-            for h, tx2 in placements:
-                x2, y2 = _reach_clamp(tx2, ty, pos[h], t_sec, max_hand_speed,
-                                      math.copysign(1.0, tx2))
+        railing = _railing_hand(beat, rail_windows)
+
+        # SNARE SHATTER: both hands accent together at their paths' positions,
+        # pushed outward — a readable two-handed impact. Builds/choruses only,
+        # and never while a hand is committed to a rail.
+        if beat in shatter_beats and ph.shatters and railing is None:
+            for h in (HAND_LEFT, HAND_RIGHT):
+                px, py = hand_path(ph, h, spread)(beat)
+                px += math.copysign(0.8 + 0.4 * spread, px)   # fling outward
+                py += (b - 0.5) * 1.2
+                x2, y2 = _reach_clamp(px, py, pos[h], t_sec, max_hand_speed,
+                                      math.copysign(1.0, px))
                 diff.notes.append(Note(time=round(beat, 4), x=round(x2, 4),
                                        y=round(y2, 4), hand_type=h))
                 pos[h] = (x2, y2, t_sec)
@@ -471,16 +424,19 @@ def _place_flow_notes(diff, onsets, snares, centroid_fn, intensity_at, phrases,
             prev_hand = HAND_RIGHT
             continue
 
-        hand = HAND_RIGHT if prev_hand == HAND_LEFT else HAND_LEFT
-        x_side, high = stance[hand]                   # may be the CROSSED side
-        ty = (2.5 + 1.3 * b) if high else (0.3 + 1.2 * b)
+        # Counterpoint: if one hand rides a rail here, the other taps.
+        if railing is not None:
+            hand = HAND_LEFT if railing == HAND_RIGHT else HAND_RIGHT
+        else:
+            hand = HAND_RIGHT if prev_hand == HAND_LEFT else HAND_LEFT
 
-        # Max amplitude: reach well out (toward the edges), scaled by intensity.
-        mag = QUAD_X_MIN + (3.5 - QUAD_X_MIN) * spread
-        tx = x_side * mag + rng.uniform(-0.3, 0.3)
-        ty += rng.uniform(-0.25, 0.25)
+        px, py = hand_path(ph, hand, spread)(beat)
+        py += (b - 0.5) * 1.2                          # brightness lifts/lowers
+        px += rng.uniform(-0.12, 0.12)
+        py += rng.uniform(-0.12, 0.12)
 
-        x, y = _reach_clamp(tx, ty, pos[hand], t_sec, max_hand_speed, x_side)
+        x, y = _reach_clamp(px, py, pos[hand], t_sec, max_hand_speed,
+                            math.copysign(1.0, px) if px else 1.0)
         diff.notes.append(Note(time=round(beat, 4), x=round(x, 4),
                                y=round(y, 4), hand_type=hand))
         notes_added += 1
@@ -488,6 +444,14 @@ def _place_flow_notes(diff, onsets, snares, centroid_fn, intensity_at, phrases,
         prev_hand = hand
 
     return notes_added, len(kept)
+
+
+def _railing_hand(beat: float, rail_windows) -> int | None:
+    """Which hand (if any) is committed to a rail at this beat."""
+    for s, e, hand in rail_windows:
+        if s - 0.25 <= beat < e + 0.25:
+            return hand
+    return None
 
 
 def _reach_clamp(tx, ty, prev, t_sec, max_hand_speed, home):

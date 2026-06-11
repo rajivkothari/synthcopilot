@@ -251,17 +251,29 @@ def pull_rail_starts(rails, notes, track, max_speed_ms) -> int:
 
 
 def _motif_adherence(notes, phrases):
-    """Do notes actually sit on their phrase's side/height plan?"""
+    """Do notes actually lie ON their phrase's planned choreography path?
+
+    Each note is compared to its (phrase, hand) path position at its beat.
+    Tolerances cover the deliberate offsets (brightness lift, jitter, shatter
+    fling); anything further is off-choreography scatter.
+    """
     if not notes:
         return 1.0
-    ok = 0
+    from synthcopilot.paths import make_path
     from synthcopilot.phrases import phrase_at
 
+    cache: dict[tuple[int, int], object] = {}
+    ok = 0
     for n in notes:
         ph = phrase_at(phrases, n.time)
-        side, high = ph.stance.get(n.hand_type, (0.0, True))
-        side_ok = (n.x * side) >= -0.5  # allow shatters/crossbacks some slack
-        ok += side_ok
+        spread = min(0.30 + 0.70 * (ph.intensity - 1.0) / 9.0 + ph.spread_boost, 1.0)
+        key = (ph.index, n.hand_type)
+        if key not in cache:
+            cache[key] = make_path(ph, n.hand_type, spread)
+        px, py = cache[key](n.time)
+        dx = abs(n.x - px)
+        dy = max(0.0, abs(n.y - py) - 0.75)   # brightness lift allowance
+        ok += math.hypot(dx, dy) <= 1.6       # jitter + shatter fling + clamps
     return ok / len(notes)
 
 
