@@ -151,14 +151,7 @@ def cmd_new(args):
           f"into {args.difficulty} "
           f"({'audio-gated' if summary['audio_used'] else 'grid-only, no audio analysis'})")
 
-    intent = summary.get("intent", [])
-    if intent:
-        print("\n=== CHOREOGRAPHY INTENT (per 8 bars) ===")
-        for s in intent:
-            print(f"[Sec {s['section']:>2} | bars {s['bars']:>7} | IV {s['intensity']:>4} "
-                  f"{s['tier']:<16}] L:{s['left_hand']:<22} R:{s['right_hand']:<22} "
-                  f"weight: {s['weight_shift']}")
-        print(f"Verification: no continuous loop exceeds {intent[0]['max_loop_beats']} beats.\n")
+    _print_debug_report(summary, track, bpm, offset, args.difficulty)
 
     if not smh_io.HAS_SMH:
         raise SystemExit(
@@ -169,6 +162,52 @@ def cmd_new(args):
     smh_io.write_synth(track, args.audio, output, mapper=args.author or "SynthCoPilot")
     print(f"Saved: {output}  (real Synth Riders format via synth_mapping_helper)")
     print("Import this .synth into the official Synth Riders editor to refine.")
+
+
+def _print_debug_report(summary, track, bpm, offset, difficulty):
+    """Stage I: the post-generation debug report."""
+    phrases = summary.get("phrases", [])
+    report = summary.get("report", {})
+    print("\n================ DEBUG REPORT ================")
+    print(f"BPM: {bpm:.1f} (octave-corrected heuristic)  offset: {offset:.3f}s")
+    print(f"difficulty: {difficulty}  notes: {summary['notes_added']}  "
+          f"rails: {summary['rails_added']}  walls: 0 (not yet generated)")
+    if report:
+        print(f"pace: avg {report['avg_objects_per_sec']} obj/s, "
+              f"peak {report['peak_objects_per_sec']} obj/s; "
+              f"worst hand speed {report['worst_hand_speed_ms']} m/s")
+    if phrases:
+        print("\n--- SECTIONS / PHRASES (label, motif, family) ---")
+        for ph in phrases:
+            t0 = track.beats_to_seconds(ph.start_beat)
+            print(f"  [{t0:6.1f}s | bars {ph.index*8+1:>3}-{ph.index*8+8:<3}] "
+                  f"{ph.label:<10} IV={ph.intensity:>4.1f}  motif={ph.stance_name:<14} "
+                  f"({ph.family}, occurrence {ph.occurrence + 1})")
+    if report:
+        print("\n--- QUALITY SCORES (threshold-gated) ---")
+        for k, v in report["scores"].items():
+            mark = ""
+            thr = report["thresholds"].get(k)
+            if thr is not None:
+                mark = "  OK" if v >= thr else f"  BELOW {thr}"
+            print(f"  {k:<22} {v * 100:5.1f}/100{mark}")
+        print(f"  {'OVERALL':<22} {report['overall'] * 100:5.1f}/100  "
+              f"{'PASSES' if report['passes'] else 'BELOW THRESHOLD'}")
+        if report["repairs"]:
+            print("\n--- REPAIRS APPLIED ---")
+            for r in report["repairs"]:
+                print(f"  - {r}")
+        if report["warnings"]:
+            print("\n--- WARNINGS ---")
+            for w in report["warnings"][:10]:
+                print(f"  ! {w}")
+        print("\n--- WHY THIS SHOULD FEEL BETTER ---")
+        print("  Phrases are mapped, not beats: each section keeps one motif that")
+        print("  recurs (verse figure, chorus figure) and evolves wider on later")
+        print("  choruses. Rails live in builds/choruses/breakdowns; verses groove.")
+        print("  Hand flow, rail joints/continuity, density-vs-energy, readability")
+        print("  and center-clustering were validated and repaired before export.")
+    print("==============================================\n")
 
 
 def main():

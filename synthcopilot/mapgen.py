@@ -222,19 +222,28 @@ def generate_map(
                 # Advance past the rail plus a rest gap (negative space).
                 seg = seg_end + rng.uniform(0.5, 1.5)
 
-    # --- Notes ride percussive transients, planned per phrase ----------- #
+    # --- E. Notes ride percussive transients, planned per phrase -------- #
     notes_added, onsets_kept = _place_flow_notes(
         diff, onsets, snares, centroid_fn, intensity_at, phrases, covered,
         track_data, preset, density_scale, max_speed_grid, total_beats, rng,
     )
 
+    # --- F+G. Validate hand flow / rails, repair, re-score --------------- #
+    from synthcopilot.quality import validate_and_repair
+
+    report = validate_and_repair(
+        diff, track_data, phrases, max_hand_speed,
+        base_per_beat=preset["note_density"] * density_scale,
+    )
+
     return {
-        "notes_added": notes_added,
+        "notes_added": len(diff.notes),
         "rails_added": rails_added,
         "onsets_kept": onsets_kept,
         "audio_used": audio_used,
         "phrases": phrases,
         "intent": _choreography_intent(phrases),
+        "report": report,
     }
 
 
