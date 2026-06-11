@@ -47,9 +47,19 @@ HEAD_RADIUS = 1.6
 NOTE_Y_LOW, NOTE_Y_HIGH = 0.2, 4.0      # bass low -> bright lead high
 NOTE_X_INNER, NOTE_X_OUTER = 0.7, 3.6   # bass central -> lead outward
 
-# Biomechanics. No long loops; quadrant zones force diagonal weight shifts.
-MAX_RAIL_BEATS = 2.0                     # FATAL ERROR 1: never a longer loop
-QUAD_X_MIN = 1.6                         # FATAL ERROR 2: stay out of the center box
+# Biomechanics. No long loops; force full-wingspan, cross-body movement.
+MAX_RAIL_BEATS = 2.0                     # never a longer loop (no washing machine)
+QUAD_X_MIN = 1.6                         # stay out of the cramped center box
+
+# Per-phrase stance: each hand -> (x_side, high?). Negative side = grid-left.
+# CROSSED stances send a hand to the OPPOSITE side (held a full phrase), and
+# Superman stances split the hands to extreme opposite high/low corners.
+PHRASE_STANCES = [
+    {HAND_LEFT: (-1.0, False), HAND_RIGHT: (1.0, True)},    # open: L low-left, R high-right
+    {HAND_LEFT: (1.0, True),   HAND_RIGHT: (-1.0, False)},  # CROSSED + Superman
+    {HAND_LEFT: (-1.0, True),  HAND_RIGHT: (1.0, False)},   # open inverted
+    {HAND_LEFT: (1.0, False),  HAND_RIGHT: (-1.0, True)},   # CROSSED inverted
+]
 
 # Per-difficulty character. note_density = notes per beat on major beats (rails
 # carry the busy sections). rail_coverage = fraction of song carried by rails.
@@ -231,10 +241,14 @@ def _choreography_intent(section_iv: list[float]) -> list[dict]:
     vector, and the loop-length verification."""
     blocks = []
     for i, iv in enumerate(section_iv):
-        flip = (i % 2) == 1  # diagonal flips each phrase
-        left = "Leads / hi-hats (top)" if flip else "Bass / kick (floor)"
-        right = "Bass / kick (floor)" if flip else "Leads / hi-hats (top)"
-        vector = "high-left -> low-right" if flip else "low-left -> high-right"
+        stance = PHRASE_STANCES[i % len(PHRASE_STANCES)]
+        ls, lhigh = stance[HAND_LEFT]
+        rs, rhigh = stance[HAND_RIGHT]
+        crossed = ls > 0  # Left hand on the right side = held cross-body
+        left = f"{'top' if lhigh else 'floor'} {'RIGHT (crossed)' if ls > 0 else 'left'}"
+        right = f"{'top' if rhigh else 'floor'} {'LEFT (crossed)' if rs < 0 else 'right'}"
+        vector = "CROSS-BODY hold (arms swap sides)" if crossed \
+            else "open weight-shift L<->R"
         tier = ("chorus/drop" if iv > 7 else "build/mid" if iv > 4 else "verse/breakdown")
         blocks.append({
             "section": i + 1, "bars": f"{i * 8 + 1}-{i * 8 + 8}",
@@ -304,16 +318,16 @@ def _section_rail(start_beat, end_beat, energy, pitch_motion, pitch_dir, hand,
     else:
         rail_type = "wave"
 
-    home = 1.0 if hand == HAND_RIGHT else -1.0
-    # The rail starts on the hand's home side and climbs/descends with the pitch
-    # (rising line sweeps upward), resolving back home-side by the end.
-    sx = home * rng.uniform(1.2, 3.0)
-    ex = home * rng.uniform(1.0, 2.8)
+    # MACRO-RAIL: a giant pendulum sweep across the WHOLE grid (>= 4 units),
+    # crossing the center line — a theatrical arm swing, not a wiggle in place.
+    diag = 1.0 if rng.random() < 0.5 else -1.0
+    sx = -3.2 * diag * rng.uniform(0.85, 1.0)
+    ex = 3.2 * diag * rng.uniform(0.85, 1.0)        # opposite extreme -> spans ~6 units
     if pitch_dir >= 0:
-        sy, ey = rng.uniform(0.2, 1.5), rng.uniform(2.2, 3.6)   # climb
+        sy, ey = rng.uniform(-0.2, 1.3), rng.uniform(2.6, 3.9)   # climb
     else:
-        sy, ey = rng.uniform(2.2, 3.6), rng.uniform(0.2, 1.5)   # descend
-    num_nodes = max(6, int(length * 4))
+        sy, ey = rng.uniform(2.6, 3.9), rng.uniform(-0.2, 1.3)   # descend
+    num_nodes = max(8, int(length * 6))
 
     nodes = generate_rail(
         start=(sx, sy, start_beat),
@@ -403,27 +417,33 @@ def _place_flow_notes(diff, onsets, snares, centroid_fn, intensity_at, covered,
         kept.extend(sorted(top, key=lambda c: c[0]))
     kept.sort(key=lambda c: c[0])
 
-    # --- Quadrant weight-shift placement (no center gravity) ------------ #
-    # Each hand owns an opposite quadrant (Left low-left / Right high-right by
-    # default), flipping the diagonal every 8 bars. Alternating notes therefore
-    # snap corner-to-corner — a real left/right + low/high body weight shift,
-    # never a centered T-Rex huddle. Brightness nudges height within the zone.
+    # --- Phrase-level stance placement: cross-body + max amplitude ------- #
+    # Each 8-bar phrase picks a STANCE (PHRASE_STANCES) assigning each hand a
+    # side (left/right, which may be CROSSED) and a height band. The stance is
+    # held the whole phrase, so the player commits to a full cross-body / Superman
+    # posture rather than twitching back to center. Cycling stances guarantees
+    # every hand visits both sides of the grid across the song.
     notes_added = 0
     prev_hand = HAND_LEFT
     pos: dict[int, tuple[float, float, float] | None] = {HAND_RIGHT: None, HAND_LEFT: None}
 
     for beat, _score, t_sec in kept:
         iv = intensity_at(beat)
-        spread = 0.25 + 0.75 * (iv - 1.0) / 9.0      # tight verse .. wide chorus
+        spread = 0.30 + 0.70 * (iv - 1.0) / 9.0      # tight verse .. wide chorus
         b = max(0.0, min(1.0, centroid_fn(t_sec)))    # brightness
+        stance = PHRASE_STANCES[int(beat // 32.0) % len(PHRASE_STANCES)]
 
-        # SNARE SHATTER: strong backbeat -> both hands fling apart (the one
-        # allowed symmetric two-handed impact). Otherwise no mirroring.
+        # SNARE SHATTER: both hands hit together. Alternately fling apart (blast)
+        # or CROSS (Right target left of Left target) for a dramatic arm-cross.
         if beat in shatter_beats and iv > 4.5:
             ty = 1.0 + 2.0 * b
-            for h, hm in ((HAND_LEFT, -1.0), (HAND_RIGHT, 1.0)):
-                tx2 = hm * (2.2 + 1.2 * spread)
-                x2, y2 = _reach_clamp(tx2, ty, pos[h], t_sec, max_hand_speed, hm)
+            cross = (round(beat) % 2 == 0)            # color-swap crossed shatter
+            mag2 = 2.4 + 1.2 * spread
+            placements = ((HAND_LEFT, mag2), (HAND_RIGHT, -mag2)) if cross \
+                else ((HAND_LEFT, -mag2), (HAND_RIGHT, mag2))
+            for h, tx2 in placements:
+                x2, y2 = _reach_clamp(tx2, ty, pos[h], t_sec, max_hand_speed,
+                                      math.copysign(1.0, tx2))
                 diff.notes.append(Note(time=round(beat, 4), x=round(x2, 4),
                                        y=round(y2, 4), hand_type=h))
                 pos[h] = (x2, y2, t_sec)
@@ -432,19 +452,11 @@ def _place_flow_notes(diff, onsets, snares, centroid_fn, intensity_at, covered,
             continue
 
         hand = HAND_RIGHT if prev_hand == HAND_LEFT else HAND_LEFT
-        # Diagonal flips each 8-bar phrase so it isn't monotonous.
-        flip = (int(beat // 32.0) % 2) == 1
-        low_hand = HAND_RIGHT if flip else HAND_LEFT   # which hand works the floor
-        x_side = -1.0 if hand == HAND_LEFT else 1.0    # Left -> left, Right -> right
+        x_side, high = stance[hand]                   # may be the CROSSED side
+        ty = (2.5 + 1.3 * b) if high else (0.3 + 1.2 * b)
 
-        # Vertical: this hand's quadrant (low vs high), nudged by brightness.
-        if hand == low_hand:
-            ty = 0.3 + 1.2 * b                          # bottom band (bass)
-        else:
-            ty = 2.6 + 1.2 * b                          # top band (leads/hats)
-
-        # Horizontal: out of the center box, scaled outward by intensity.
-        mag = QUAD_X_MIN + (3.4 - QUAD_X_MIN) * spread
+        # Max amplitude: reach well out (toward the edges), scaled by intensity.
+        mag = QUAD_X_MIN + (3.5 - QUAD_X_MIN) * spread
         tx = x_side * mag + rng.uniform(-0.3, 0.3)
         ty += rng.uniform(-0.25, 0.25)
 

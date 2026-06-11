@@ -78,15 +78,48 @@ def test_frequency_drives_height():
 
 
 def test_no_center_gravity():
-    """Quadrant weight-shift: notes stay out of the cramped center box."""
+    """Notes stay out of the cramped center box and use the wingspan."""
     import numpy as np
     track = _track()
     generate_map(track, None, StyleProfile.default(), difficulty="Master",
                  onsets=_dense_onsets(40.0, 0.1), duration_sec=40.0,
                  intensity_fn=lambda s: 0.9, seed=4)
     xs = np.array([n.x for n in track.difficulties["Master"].notes])
-    # The vast majority of notes should sit outside the central |x| < 1 box.
     assert np.mean(np.abs(xs) >= 1.0) > 0.85, "too many notes clustered center"
+    assert xs.max() > 2.0 and xs.min() < -2.0, "not using the full wingspan"
+
+
+def test_grid_amplitude_check_cross_body():
+    """The user's amplitude check: Left hand MUST reach the right side and
+    Right hand MUST reach the left side somewhere (held cross-overs)."""
+    import numpy as np
+    track = _track()
+    # >2 phrases so the crossed stances are exercised.
+    generate_map(track, None, StyleProfile.default(), difficulty="Master",
+                 onsets=_dense_onsets(80.0, 0.1), duration_sec=80.0,
+                 intensity_fn=lambda s: 0.8, seed=5)
+    notes = track.difficulties["Master"].notes
+    left_x = [n.x for n in notes if n.hand_type == 1]   # HAND_LEFT
+    right_x = [n.x for n in notes if n.hand_type == 0]  # HAND_RIGHT
+    assert max(left_x) > 0, "Left hand never crosses to the right side"
+    assert min(right_x) < 0, "Right hand never crosses to the left side"
+
+
+def test_macro_rails_span_wide():
+    """Rails must be wide swoops (>=4 grid units), not wiggles in place."""
+    import numpy as np
+    track = _track()
+    def energy(sec):
+        return 0.9 if 40 < sec * 2.0 < 120 else 0.2
+    generate_map(track, None, StyleProfile.default(), difficulty="Master",
+                 onsets=_dense_onsets(80.0), energy_fn=energy, duration_sec=80.0,
+                 centroid_fn=lambda s: 0.6, seed=7)
+    rails = track.difficulties["Master"].rails
+    assert rails, "expected rails"
+    spans = [max(n.x for n in r.nodes) - min(n.x for n in r.nodes) for r in rails]
+    assert np.mean(spans) >= 4.0, f"rails too narrow (mean span {np.mean(spans):.1f})"
+    # And still no washing machine.
+    assert all(r.nodes[-1].time - r.nodes[0].time <= 2.01 for r in rails)
 
 
 def test_notes_avoid_head_zone():
