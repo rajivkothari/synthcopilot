@@ -45,10 +45,10 @@ STANCES = {
 #              accents — intros/breakdowns/outros); "sweep" = 1-bar sweeps
 #   body / relationship: the physical idea, for the plan and debug report
 PHRASE_GRAMMAR = {
-    "intro":     dict(density=0.40, subdiv=2, rails=True,  shatters=False, ramp=False,
+    "intro":     dict(density=0.26, subdiv=2, rails=True,  shatters=False, ramp=False,
                       fill=False, wall=False, rail_mode="long",
                       stances=["open_groove"],
-                      body="slow sweeping rails, sparse downbeat accents",
+                      body="long sweeping rails, sparse downbeat accents",
                       relationship="one-hand rail + sparse other-hand accents"),
     "verse":     dict(density=1.00, subdiv=2, rails=False, shatters=False, ramp=False,
                       fill=False, wall=False, rail_mode="sweep",

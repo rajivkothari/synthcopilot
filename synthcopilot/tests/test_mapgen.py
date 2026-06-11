@@ -129,8 +129,8 @@ def test_macro_rails_span_wide():
     assert rails, "expected rails"
     spans = [max(n.x for n in r.nodes) - min(n.x for n in r.nodes) for r in rails]
     assert np.mean(spans) >= 4.0, f"rails too narrow (mean span {np.mean(spans):.1f})"
-    # Sweep rails stay <= 4 beats; Intro Rail Mode allows 2-bar (8-beat) rails.
-    assert all(r.nodes[-1].time - r.nodes[0].time <= 8.01 for r in rails)
+    # Sweep rails stay <= 4 beats; Intro Rail Mode allows up to 4-bar rails.
+    assert all(r.nodes[-1].time - r.nodes[0].time <= 16.01 for r in rails)
 
 
 def test_notes_avoid_head_zone():

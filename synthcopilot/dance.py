@@ -82,14 +82,15 @@ def beat_role(beat: float, phase: float, phrase) -> str:
 
 
 def _accent(role: str) -> float:
-    """Magnitude multiplier: strong beats reach the gesture's extreme."""
+    """Magnitude multiplier: strong beats reach the gesture's extreme and read
+    as the visual anchors; weak beats sit inner and connective."""
     if role.startswith("strong"):
-        return 1.15
+        return 1.3
     if role == "offbeat":
-        return 0.85
+        return 0.8
     if role == "fill":
         return 1.0
-    return 0.75
+    return 0.6
 
 
 # --- Gesture templates: (phase, side, amp, brightness, bar_idx, n_bars) -> xy #

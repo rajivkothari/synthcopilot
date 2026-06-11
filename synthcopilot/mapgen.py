@@ -208,7 +208,10 @@ def generate_map(
             # phrases ("sweep") keep 1-bar pendulum sweeps gated to sustained
             # harmonic music.
             long_mode = ph.rail_mode == "long"
-            rail_len = 8.0 if long_mode else RAIL_SWEEP_BEATS
+            # The lowest-energy sections (intro) get the longest, slowest
+            # 4-bar rails; breakdown/outro use 2-bar rails.
+            rail_len = (16.0 if (long_mode and ph.intensity < 2.5)
+                        else 8.0 if long_mode else RAIL_SWEEP_BEATS)
             gap = 2.0 if long_mode else 4.0
             w = ph.start_beat + (1.0 if long_mode else 6.0)
             shape_cycle = 0
@@ -308,46 +311,63 @@ RECOVERY_BEATS = 2.0
 
 
 def _beat_lock_verify(track, diff, onsets) -> dict | None:
-    """BeatLockVerifier: measure strong-beat objects against the audio's
-    percussive onsets; if the whole map is consistently early/late, apply a
-    global offset correction so the grid sits ON the music.
+    """BeatLockCalibration: measure strong-beat objects against the audio's
+    percussive onsets, then calibrate the *grid* (not the objects):
 
-    Objects stay quantized to musical subdivisions (we never snap to raw
-    onsets); only the global offset moves.
+      1. fit timing error vs beat — a consistent slope means the BPM is
+         slightly off (drift); correct BPM;
+      2. remove any residual early/late bias by shifting the global offset.
+
+    Objects stay quantized to musical subdivisions; only BPM/offset move.
     """
     if not onsets:
         return None
-    onset_secs = np.array(sorted(t for t, _ in onsets))
-    if onset_secs.size < 8:
+    # Calibrate against STRONG onsets (kicks/snares are tighter than hats).
+    smax = max(s for _, s in onsets) or 1.0
+    strong = np.array(sorted(t for t, s in onsets if s / smax >= 0.4))
+    if strong.size < 12:
+        strong = np.array(sorted(t for t, _ in onsets))
+    if strong.size < 12:
         return None
 
     def errors():
         errs = []
         for n in diff.notes:
-            if abs(n.time - round(n.time)) > 0.02:   # strong (on-beat) objects only
+            if abs(n.time - round(n.time)) > 0.02:    # strong (on-beat) objects
                 continue
             ns = track.beats_to_seconds(n.time)
-            i = int(np.searchsorted(onset_secs, ns))
+            i = int(np.searchsorted(strong, ns))
             best = None
             for j in (i - 1, i):
-                if 0 <= j < onset_secs.size:
-                    d = ns - float(onset_secs[j])
+                if 0 <= j < strong.size:
+                    d = ns - float(strong[j])
                     if best is None or abs(d) < abs(best):
                         best = d
-            if best is not None and abs(best) <= 0.09:
+            if best is not None and abs(best) <= 0.075:
                 errs.append((n.time, best))
-            # unmatched strong notes are fine: not every beat has percussion
         return errs
 
-    errs = errors()
     corrected_ms = 0.0
-    if len(errs) >= 12:
-        bias = float(np.median([e for _, e in errs]))
-        # Consistent early/late bias -> shift the global offset (clamped >= 0).
-        if abs(bias) > 0.012 and track.offset - bias >= 0:
-            track.offset = track.offset - bias
-            corrected_ms = -bias * 1000.0
-            errs = errors()
+    bpm_corrected = 0.0
+    errs = errors()
+    if len(errs) >= 24:
+        beats = np.array([b for b, _ in errs])
+        errv = np.array([e for _, e in errs])
+        # 1. Drift: slope of error(sec) vs beat -> BPM is off.
+        slope, intercept = np.polyfit(beats, errv, 1)
+        if abs(slope) > 2e-4:                          # ~0.2 ms per beat
+            new_bpm = 1.0 / (1.0 / track.bpm - slope / 60.0)
+            if abs(new_bpm - track.bpm) < 3.0:         # only small, safe corrections
+                bpm_corrected = new_bpm - track.bpm
+                track.bpm = new_bpm
+                errs = errors()
+        # 2. Residual bias: shift the global offset.
+        if errs:
+            bias = float(np.median([e for _, e in errs]))
+            if abs(bias) > 0.010 and track.offset - bias >= 0:
+                track.offset -= bias
+                corrected_ms = -bias * 1000.0
+                errs = errors()
 
     if not errs:
         return {"matches": 0, "note": "no percussive matches; grid kept as detected"}
@@ -367,6 +387,7 @@ def _beat_lock_verify(track, diff, onsets) -> dict | None:
         "pct_50ms": round(float(np.mean(np.abs(e_ms) <= 50)), 2),
         "worst_section": f"phrase {worst[0]} ({float(np.median(worst[1])):+.0f}ms)",
         "corrected_offset_ms": round(corrected_ms, 1),
+        "corrected_bpm": round(bpm_corrected, 3),
     }
 
 

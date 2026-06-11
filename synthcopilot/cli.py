@@ -202,8 +202,13 @@ def _print_debug_report(summary, track, bpm, offset, difficulty):
                   f"({bl['bias']})")
             print(f"  within ±20ms: {bl['pct_20ms']:.0%}  ±35ms: {bl['pct_35ms']:.0%}  "
                   f"±50ms: {bl['pct_50ms']:.0%}")
+            corr = []
+            if bl.get('corrected_bpm'):
+                corr.append(f"BPM {bl['corrected_bpm']:+.3f}")
+            if bl.get('corrected_offset_ms'):
+                corr.append(f"offset {bl['corrected_offset_ms']:+.0f}ms")
             print(f"  worst section: {bl['worst_section']}  "
-                  f"offset correction applied: {bl['corrected_offset_ms']}ms")
+                  f"calibration: {', '.join(corr) if corr else 'none needed'}")
 
     if phrases:
         from synthcopilot.dance import groove_for, payoff_for
