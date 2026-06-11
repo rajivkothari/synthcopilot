@@ -33,24 +33,40 @@ STANCES = {
 }
 
 # Pattern grammar: per section label, the phrase's character.
-#   density: multiplier on the difficulty's base notes/bar
-#   rails:   may this phrase carry rails?
+#   density:  multiplier on the difficulty's base notes/beat
+#   subdiv:   rhythm resolution (2 = 1/8 grid, 4 = 1/16 bursts available)
+#   rails:    may this phrase carry rails?
 #   shatters: may strong snares fire dual-note accents?
-#   stances: which stances the label's motif may use (picked once, stays)
-#   ramp:    density ramps up across the phrase (builds)
+#   stances:  which stances the label's motif may use (picked once, stays)
+#   ramp:     density ramps up across the phrase (builds)
+#   fill:     phrase-end burst fill into the next phrase
+#   wall:     body-choreography wall at the phrase transition
+#   body / relationship: the physical idea, for the plan and debug report
 PHRASE_GRAMMAR = {
-    "intro":     dict(density=0.45, rails=False, shatters=False, ramp=False,
-                      stances=["open_groove"]),
-    "verse":     dict(density=0.75, rails=False, shatters=False, ramp=False,
-                      stances=["open_groove", "open_inverted"]),
-    "build":     dict(density=1.0,  rails=True,  shatters=True,  ramp=True,
-                      stances=["open_inverted", "crossed_super"]),
-    "chorus":    dict(density=1.25, rails=True,  shatters=True,  ramp=False,
-                      stances=["crossed_super", "crossed_floor", "open_groove"]),
-    "breakdown": dict(density=0.5,  rails=True,  shatters=False, ramp=False,
-                      stances=["open_groove"]),
-    "outro":     dict(density=0.4,  rails=True,  shatters=False, ramp=False,
-                      stances=["open_groove"]),
+    "intro":     dict(density=0.60, subdiv=2, rails=False, shatters=False, ramp=False,
+                      fill=False, wall=False, stances=["open_groove"],
+                      body="center bounce, establish groove",
+                      relationship="alternating"),
+    "verse":     dict(density=1.00, subdiv=2, rails=False, shatters=False, ramp=False,
+                      fill=False, wall=False, stances=["open_groove", "open_inverted"],
+                      body="side-to-side sweep, low groove",
+                      relationship="alternating (call-and-response phase)"),
+    "build":     dict(density=1.20, subdiv=4, rails=True,  shatters=True,  ramp=True,
+                      fill=True,  wall=False, stances=["open_inverted", "crossed_super"],
+                      body="vertical lift, widening",
+                      relationship="alternating -> mirrored at peak"),
+    "chorus":    dict(density=1.40, subdiv=4, rails=True,  shatters=True,  ramp=False,
+                      fill=True,  wall=True,  stances=["crossed_super", "crossed_floor", "open_groove"],
+                      body="wide dance arc, torso lean into entry",
+                      relationship="counter-sweep + rail-with-tap counterpoint"),
+    "breakdown": dict(density=0.55, subdiv=2, rails=True,  shatters=False, ramp=False,
+                      fill=False, wall=False, stances=["open_groove"],
+                      body="reset / breath, expressive arms",
+                      relationship="one-hand rail, other rests"),
+    "outro":     dict(density=0.50, subdiv=2, rails=True,  shatters=False, ramp=False,
+                      fill=False, wall=False, stances=["open_groove"],
+                      body="wind-down groove",
+                      relationship="alternating"),
 }
 
 # Rhythm signatures (motif beats within a 4-beat bar) per label. The selector
@@ -77,9 +93,14 @@ class Phrase:
     stance_name: str = ""
     stance: dict = field(default_factory=dict)
     density: float = 1.0
+    subdiv: int = 2
     rails: bool = True
     shatters: bool = False
     ramp: bool = False
+    fill: bool = False
+    wall: bool = False
+    body: str = ""
+    relationship: str = ""
     spread_boost: float = 0.0        # motif evolution: later choruses go wider
     rhythm: list = field(default_factory=list)
 
@@ -158,9 +179,14 @@ def build_phrase_map(section_iv: list[float], seed: int = 0) -> list[Phrase]:
             stance_name=stance_name,
             stance=STANCES[stance_name],
             density=g["density"] * (1.0 + (0.08 * occ if label == "chorus" else 0.0)),
+            subdiv=g["subdiv"],
             rails=g["rails"],
             shatters=g["shatters"],
             ramp=g["ramp"],
+            fill=g["fill"],
+            wall=g["wall"],
+            body=g["body"],
+            relationship=g["relationship"],
             spread_boost=min(0.25, 0.08 * occ) if label == "chorus" else 0.0,
             rhythm=RHYTHM_SIGNATURES[label],
         ))

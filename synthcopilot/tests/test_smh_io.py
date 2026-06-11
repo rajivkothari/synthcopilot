@@ -129,6 +129,22 @@ def test_extract_audio_yields_readable_file(click_wav, tmp_path):
     assert audio_path and __import__("os").path.getsize(audio_path) > 0
 
 
+def test_walls_roundtrip(click_wav, tmp_path):
+    from synthcopilot.models import Wall
+
+    track = new_track(audio_filename="click.ogg", bpm=120.0, name="W")
+    track.difficulties["Master"].notes.append(Note(time=2.0, x=1.0, y=1.5))
+    track.difficulties["Master"].walls.append(Wall(time=8.0, wall_type="angle_left"))
+    track.difficulties["Master"].walls.append(Wall(time=16.0, wall_type="crouch"))
+    out = tmp_path / "W.synth"
+    smh_io.write_synth(track, click_wav, str(out))
+
+    counts = smh.SynthFile.from_synth(out).difficulties["Master"].get_counts()
+    assert counts["walls"]["total"] == 2
+    assert counts["walls"]["angle_left"] == 1
+    assert counts["walls"]["crouch"] == 1
+
+
 def test_full_generate_to_real_synth(click_wav, tmp_path):
     track = new_track(audio_filename="click.ogg", bpm=120.0, name="Gen")
     onsets = [(i * 0.1, 1.0) for i in range(80)]

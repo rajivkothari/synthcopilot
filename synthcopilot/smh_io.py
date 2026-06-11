@@ -139,10 +139,10 @@ def build_synthfile(
             pass  # offset is non-critical; the mapper can fix it in-editor
 
     for diff_name, diff in track_data.difficulties.items():
-        if not (diff.notes or diff.rails):
+        if not (diff.notes or diff.rails or diff.walls):
             continue
         dc = _sf.DataContainer(bpm=float(track_data.bpm))
-        _fill_container(dc, diff.notes, diff.rails)
+        _fill_container(dc, diff.notes, diff.rails, diff.walls)
         synth.difficulties[diff_name] = dc
     return synth
 
@@ -162,8 +162,8 @@ def write_synth(
     return str(out)
 
 
-def _fill_container(dc, notes, rails) -> None:
-    """Add our notes/rails into an SMH DataContainer (recenters y, by hand)."""
+def _fill_container(dc, notes, rails, walls=()) -> None:
+    """Add our notes/rails/walls into an SMH DataContainer (recenters y)."""
     buckets = {"right": dc.right, "left": dc.left}
 
     def _put(bucket: dict, beat: float, arr: np.ndarray) -> None:
@@ -182,6 +182,12 @@ def _fill_container(dc, notes, rails) -> None:
         field = _HAND_FIELD.get(r.hand_type, "right")
         arr = np.array([[nd.x, nd.y - Y_CENTER, float(nd.time)] for nd in r.nodes])
         _put(buckets[field], float(r.nodes[0].time), arr)
+
+    for w in walls:
+        type_idx = _sf.WALL_TYPES.get(w.wall_type, _sf.WALL_TYPES["center"])[0]
+        _put(dc.walls, float(w.time),
+             np.array([[w.x, w.y - Y_CENTER, float(w.time), type_idx,
+                        float(w.rotation)]]))
 
 
 # ---------------------------------------------------------------------------

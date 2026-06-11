@@ -64,8 +64,10 @@ def test_validate_and_repair_report_shape():
         diff.notes.append(Note(time=float(i), x=x, y=1.5 + 0.5 * (i % 3), hand_type=hand))
     report = validate_and_repair(diff, track, phrases, max_speed_ms=6.0, base_per_beat=0.65)
     for key in ("scores", "overall", "passes", "warnings", "repairs",
-                "avg_objects_per_sec", "peak_objects_per_sec"):
+                "avg_objects_per_sec", "peak_objects_per_sec", "verdict"):
         assert key in report
+    assert "counterpoint" in report["scores"]
+    assert "wall_fairness" in report["scores"]
     assert report["scores"]["hand_flow"] == 1.0
     assert report["scores"]["center_clustering"] == 1.0
     assert report["scores"]["beat_alignment"] == 1.0

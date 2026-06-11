@@ -153,6 +153,15 @@ def cmd_new(args):
 
     _print_debug_report(summary, track, bpm, offset, args.difficulty)
 
+    # H. Export gate: a Master request must EARN the Master verdict.
+    verdict = summary.get("report", {}).get("verdict", "")
+    if args.difficulty == "Master" and verdict not in ("Master", "Master Plus") \
+            and not args.allow_lower:
+        raise SystemExit(
+            f"Refusing to export: verdict is '{verdict}', not Master. "
+            f"Raise --density, check the BPM, or pass --allow-lower to export anyway."
+        )
+
     if not smh_io.HAS_SMH:
         raise SystemExit(
             "synth_mapping_helper is required to write editor-correct .synth files. "
@@ -171,18 +180,19 @@ def _print_debug_report(summary, track, bpm, offset, difficulty):
     print("\n================ DEBUG REPORT ================")
     print(f"BPM: {bpm:.1f} (octave-corrected heuristic)  offset: {offset:.3f}s")
     print(f"difficulty: {difficulty}  notes: {summary['notes_added']}  "
-          f"rails: {summary['rails_added']}  walls: 0 (not yet generated)")
+          f"rails: {summary['rails_added']}  walls: {summary.get('walls_added', 0)}")
     if report:
         print(f"pace: avg {report['avg_objects_per_sec']} obj/s, "
               f"peak {report['peak_objects_per_sec']} obj/s; "
               f"worst hand speed {report['worst_hand_speed_ms']} m/s")
     if phrases:
-        print("\n--- SECTIONS / PHRASES (label, motif, family) ---")
+        print("\n--- CHOREOGRAPHY PLAN (per 8-bar phrase) ---")
         for ph in phrases:
             t0 = track.beats_to_seconds(ph.start_beat)
             print(f"  [{t0:6.1f}s | bars {ph.index*8+1:>3}-{ph.index*8+8:<3}] "
                   f"{ph.label:<10} IV={ph.intensity:>4.1f}  motif={ph.stance_name:<14} "
-                  f"({ph.family}, occurrence {ph.occurrence + 1})")
+                  f"occ {ph.occurrence + 1}")
+            print(f"           body: {ph.body};  hands: {ph.relationship}")
     if report:
         print("\n--- QUALITY SCORES (threshold-gated) ---")
         for k, v in report["scores"].items():
@@ -193,6 +203,7 @@ def _print_debug_report(summary, track, bpm, offset, difficulty):
             print(f"  {k:<22} {v * 100:5.1f}/100{mark}")
         print(f"  {'OVERALL':<22} {report['overall'] * 100:5.1f}/100  "
               f"{'PASSES' if report['passes'] else 'BELOW THRESHOLD'}")
+        print(f"\n  VERDICT: {report['verdict']}")
         if report["repairs"]:
             print("\n--- REPAIRS APPLIED ---")
             for r in report["repairs"]:
@@ -268,6 +279,8 @@ def main():
     p_new.add_argument("--max-hand-speed", type=float, default=6.0,
                         help="Max hand speed in METERS/sec — the no-teleport limit (default: 6.0)")
     p_new.add_argument("--no-rails", action="store_true", help="Place notes only, no rails")
+    p_new.add_argument("--allow-lower", action="store_true",
+                        help="Export even if the quality verdict is below Master")
     p_new.add_argument("--seed", type=int, help="RNG seed for reproducible output")
     p_new.add_argument("--name", help="Map name (default: audio filename)")
     p_new.add_argument("--author", default="", help="Map author")

@@ -128,8 +128,8 @@ def test_macro_rails_span_wide():
     assert rails, "expected rails"
     spans = [max(n.x for n in r.nodes) - min(n.x for n in r.nodes) for r in rails]
     assert np.mean(spans) >= 4.0, f"rails too narrow (mean span {np.mean(spans):.1f})"
-    # And still no washing machine.
-    assert all(r.nodes[-1].time - r.nodes[0].time <= 2.01 for r in rails)
+    # Rails are linear pendulum SWEEPS (<= 4 beats) — never longer loops.
+    assert all(r.nodes[-1].time - r.nodes[0].time <= 4.01 for r in rails)
 
 
 def test_notes_avoid_head_zone():

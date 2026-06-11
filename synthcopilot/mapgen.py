@@ -47,7 +47,8 @@ NOTE_Y_LOW, NOTE_Y_HIGH = 0.2, 4.0      # bass low -> bright lead high
 NOTE_X_INNER, NOTE_X_OUTER = 0.7, 3.6   # bass central -> lead outward
 
 # Biomechanics. No long loops; force full-wingspan, cross-body movement.
-MAX_RAIL_BEATS = 2.0                     # never a longer loop (no washing machine)
+MAX_RAIL_BEATS = 2.0                     # never a longer LOOP (no washing machine)
+RAIL_SWEEP_BEATS = 4.0                   # linear pendulum sweeps may run longer
 QUAD_X_MIN = 1.6                         # stay out of the cramped center box
 
 # Phrase planning (sections, grammar, motifs) lives in synthcopilot.phrases.
@@ -55,12 +56,14 @@ QUAD_X_MIN = 1.6                         # stay out of the cramped center box
 # Per-difficulty character. note_density = notes per beat on major beats (rails
 # carry the busy sections). rail_coverage = fraction of song carried by rails.
 # max_complexity = ceiling on rail modifier intensity.
+# note_density is the BASE notes/beat; phrase grammar multiplies it (chorus
+# 1.4x, verse 1.0x ...). Master targets real Master pace: ~3-5 obj/sec.
 DIFFICULTY_PRESETS = {
-    "Easy":   dict(subdiv=1, note_density=0.30, rail_coverage=0.10, max_complexity=2),
-    "Normal": dict(subdiv=1, note_density=0.45, rail_coverage=0.15, max_complexity=3),
-    "Hard":   dict(subdiv=2, note_density=0.60, rail_coverage=0.20, max_complexity=5),
-    "Expert": dict(subdiv=2, note_density=0.80, rail_coverage=0.26, max_complexity=7),
-    "Master": dict(subdiv=2, note_density=1.00, rail_coverage=0.32, max_complexity=9),
+    "Easy":   dict(note_density=0.45, rail_coverage=0.10, max_complexity=2),
+    "Normal": dict(note_density=0.65, rail_coverage=0.15, max_complexity=3),
+    "Hard":   dict(note_density=0.90, rail_coverage=0.20, max_complexity=5),
+    "Expert": dict(note_density=1.20, rail_coverage=0.26, max_complexity=7),
+    "Master": dict(note_density=1.50, rail_coverage=0.32, max_complexity=9),
 }
 _DEFAULT_PRESET = DIFFICULTY_PRESETS["Expert"]
 
@@ -199,11 +202,13 @@ def generate_map(
             if not ph.rails:
                 continue
             spread = min(0.30 + 0.70 * (ph.intensity - 1.0) / 9.0 + ph.spread_boost, 1.0)
-            # Rail windows aligned to the path's center-crossing (its fastest,
-            # widest sweep), one per 8 beats, only where the music sustains.
-            w = ph.start_beat + 3.0
-            while w + MAX_RAIL_BEATS <= min(ph.end_beat, total_beats):
-                we = w + MAX_RAIL_BEATS
+            # Rail windows CENTERED on the path's center-crossings (t = 8, 16,
+            # 24 of the 16-beat sweep), so each rail is the path's widest,
+            # fastest pendulum swing — a 4-beat SWEEP (not a loop), emitted
+            # only where the music sustains.
+            w = ph.start_beat + 6.0
+            while w + RAIL_SWEEP_BEATS <= min(ph.end_beat, total_beats):
+                we = w + RAIL_SWEEP_BEATS
                 if any(s < we and w < e for s, e, _m in spans):
                     path = make_path(ph, hand_cycle, spread)
                     home = 1.0 if hand_cycle == HAND_RIGHT else -1.0
@@ -227,6 +232,33 @@ def generate_map(
         track_data, preset, density_scale, max_speed_grid, total_beats, rng,
     )
 
+    # --- Walls: body choreography at phrase transitions ------------------ #
+    # A wall is a body instruction, not a hazard: a side gate on the beat
+    # before each chorus forces the torso lean INTO the drop (alternating
+    # sides), and the final chorus entry gets a crouch. Notes within half a
+    # beat are cleared so the wall is always fair and readable.
+    walls_added = 0
+    if with_rails:  # walls accompany the full choreography pipeline
+        from synthcopilot.models import Wall
+
+        lean = 1
+        chorus_phrases = [p for p in phrases if p.wall]
+        for ci, ph in enumerate(chorus_phrases):
+            wbeat = ph.start_beat - 1.0
+            if wbeat <= 0:
+                continue
+            final = ci == len(chorus_phrases) - 1
+            if final:
+                wtype, wx, wy = "crouch", 0.0, 1.5
+            else:
+                wtype = "angle_right" if lean > 0 else "angle_left"
+                wx, wy = 0.0, 1.5
+                lean = -lean
+            diff.walls.append(Wall(time=round(wbeat, 4), x=wx, y=wy, wall_type=wtype))
+            walls_added += 1
+            # Fairness: clear notes near the wall so the body move is clean.
+            diff.notes = [n for n in diff.notes if abs(n.time - wbeat) > 0.5]
+
     # --- F+G. Validate hand flow / rails, repair, re-score --------------- #
     from synthcopilot.quality import validate_and_repair
 
@@ -238,6 +270,7 @@ def generate_map(
     return {
         "notes_added": len(diff.notes),
         "rails_added": rails_added,
+        "walls_added": walls_added,
         "onsets_kept": onsets_kept,
         "audio_used": audio_used,
         "phrases": phrases,
@@ -338,15 +371,13 @@ def _place_flow_notes(diff, onsets, snares, centroid_fn, intensity_at, phrases,
     scatter. While one hand rides a rail, the OTHER taps (counterpoint).
     Brightness nudges height; snare shatters fire both paths at once.
     """
-    subdiv = preset["subdiv"]
     # Strong snare beats -> dual-note shatters (quantized, top half by strength).
     shatter_beats: set[float] = set()
     if snares:
         smax = max(s for _, s in snares) or 1.0
         for t_sec, strength in snares:
             if strength / smax >= 0.55:
-                qb = round(track.seconds_to_beats(t_sec) * subdiv) / subdiv
-                shatter_beats.add(qb)
+                shatter_beats.add(round(round(track.seconds_to_beats(t_sec) * 2) / 2, 4))
 
     # Quantize onsets to the grid, dedupe per slot keeping the strongest. The
     # phrase's MOTIF rhythm signature boosts its slots so the same rhythmic
@@ -354,19 +385,35 @@ def _place_flow_notes(diff, onsets, snares, centroid_fn, intensity_at, phrases,
     from synthcopilot.paths import make_path
     from synthcopilot.phrases import phrase_at
 
+    # RHYTHM SLOT ENGINE: musically meaningful slots, not just onsets. Every
+    # bar gets a TEMPLATE grid at the phrase's subdivision (1/8 for grooves,
+    # 1/16 available in builds/drops) with the motif signature emphasized;
+    # audio onsets then BOOST the slots they land on. The budget is therefore
+    # always fillable at Master pace even where onset detection is sparse, and
+    # the figure stays rhythmically anchored to the phrase template.
     slots: dict[float, tuple[float, float]] = {}
+    n_bars = int(math.ceil(total_beats / 4.0))
+    for bar in range(n_bars):
+        bar_beat = bar * 4.0
+        ph = phrase_at(phrases, bar_beat)
+        step = 1.0 / ph.subdiv
+        q = bar_beat
+        while q < bar_beat + 4.0 and q < total_beats:
+            on_motif = any(abs((q % 4.0) - m) < 0.13 for m in ph.rhythm)
+            base = 0.55 if on_motif else 0.30
+            slots[round(q, 4)] = (base * _beat_emphasis(q), track.beats_to_seconds(q))
+            q += step
     for t_sec, strength in onsets:
         beat = max(0.0, track.seconds_to_beats(t_sec))
-        qbeat = round(beat * subdiv) / subdiv
-        ph = phrase_at(phrases, qbeat)
-        motif_bonus = 1.5 if any(abs((qbeat % 4.0) - m) < 0.13 for m in ph.rhythm) else 1.0
-        score = max(0.0, min(1.0, strength)) * _beat_emphasis(qbeat) * motif_bonus
-        if qbeat not in slots or score > slots[qbeat][0]:
-            slots[qbeat] = (score, track.beats_to_seconds(qbeat))
+        ph = phrase_at(phrases, beat)
+        qbeat = round(round(beat * ph.subdiv) / ph.subdiv, 4)
+        if qbeat in slots:
+            sc, ts = slots[qbeat]
+            slots[qbeat] = (sc + 0.8 * max(0.0, min(1.0, strength)), ts)
 
-    # Select PER BAR on the strongest hits — but the note budget is the
-    # PHRASE's: verses groove at medium density, intros establish sparsely,
-    # builds RAMP upward bar by bar, choruses peak. Intensity follows energy.
+    # Select PER BAR on the strongest slots — the budget is the PHRASE's:
+    # verses groove, intros establish sparsely, builds RAMP bar by bar,
+    # choruses peak, and fill phrases burst into the transition.
     candidates = sorted((b, sc, ts) for b, (sc, ts) in slots.items())
     base_per_bar = preset["note_density"] * density_scale * 4.0
     by_bar: dict[int, list[tuple[float, float, float]]] = {}
@@ -381,8 +428,8 @@ def _place_flow_notes(diff, onsets, snares, centroid_fn, intensity_at, phrases,
             pos_in = (bar_beat - ph.start_beat) / max(ph.end_beat - ph.start_beat, 1e-6)
             factor *= 0.6 + 0.8 * pos_in
         per_bar = max(1, int(round(base_per_bar * factor)))
-        if ph.ramp and bar_beat + 4.0 >= ph.end_beat - 1e-6:
-            per_bar += 2  # phrase-end fill into the drop
+        if ph.fill and bar_beat + 4.0 >= ph.end_beat - 1e-6:
+            per_bar += 3  # phrase-end 1/16 burst fill into the transition
         top = sorted(by_bar[b_idx], key=lambda c: c[1], reverse=True)[:per_bar]
         kept.extend(sorted(top, key=lambda c: c[0]))
     kept.sort(key=lambda c: c[0])

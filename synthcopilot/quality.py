@@ -135,7 +135,8 @@ def _playability(notes):
     return score, warnings
 
 
-def _beat_alignment(notes, subdiv=2):
+def _beat_alignment(notes, subdiv=4):
+    """Notes must sit on the rhythm grid (finest legal slot is 1/16 = subdiv 4)."""
     if not notes:
         return 1.0
     ok = sum(1 for n in notes
@@ -248,6 +249,52 @@ def pull_rail_starts(rails, notes, track, max_speed_ms) -> int:
             r.nodes[i].y += shift_y * w
         fixed += 1
     return fixed
+
+
+def _counterpoint(rails, notes):
+    """While one hand rides a rail, the other should be doing meaningful work
+    (tapping accents) — both hands idle or one hand abandoned is bad mapping."""
+    if not rails:
+        return 1.0
+    supported = 0
+    for r in rails:
+        if not r.nodes:
+            continue
+        s, e = r.nodes[0].time, r.nodes[-1].time
+        other = sum(1 for n in notes
+                    if n.hand_type != r.hand_type and s - 0.25 <= n.time <= e + 0.25)
+        supported += other >= 1
+    return supported / len(rails)
+
+
+def _wall_fairness(walls, notes):
+    """Walls must not collide with note demands (cleared window around each)."""
+    warnings = []
+    bad = 0
+    for w in walls:
+        near = [n for n in notes if abs(n.time - w.time) <= 0.45]
+        if near:
+            bad += 1
+            warnings.append(f"wall at beat {w.time:.1f} overlaps {len(near)} note(s)")
+    score = 1.0 if not walls else max(0.0, 1.0 - bad / len(walls))
+    return score, warnings
+
+
+def _verdict(avg_ops, peak_ops, scores) -> str:
+    """Difficulty verdict from pace + quality. Master needs Master pace."""
+    critical_ok = (scores["playability"] >= 0.9 and scores["hand_flow"] >= 0.85
+                   and scores["center_clustering"] >= 0.65)
+    if not critical_ok:
+        return "Unplayable/Failed"
+    if avg_ops < 1.2:
+        return "Beginner"
+    if avg_ops < 1.8:
+        return "Normal"
+    if avg_ops < 2.5:
+        return "Hard"
+    if avg_ops < 3.2:
+        return "Expert"
+    return "Master Plus" if avg_ops >= 4.5 and peak_ops >= 7 else "Master"
 
 
 def _motif_adherence(notes, phrases):
@@ -364,18 +411,21 @@ def validate_and_repair(diff, track, phrases, max_speed_ms, base_per_beat) -> di
         read, w3 = _readability(diff.notes)
         play, w4 = _playability(diff.notes)
         cont, w5 = _rail_continuity(diff.rails, diff.notes, track, max_speed_ms)
+        fair, w6 = _wall_fairness(getattr(diff, "walls", []), diff.notes)
         scores = {
             "hand_flow": round(flow, 3),
             "rail_smoothness": round(rail, 3),
             "rail_continuity": round(cont, 3),
+            "counterpoint": round(_counterpoint(diff.rails, diff.notes), 3),
             "readability": round(read, 3),
             "playability": round(play, 3),
+            "wall_fairness": round(fair, 3),
             "beat_alignment": round(_beat_alignment(diff.notes), 3),
             "density_energy_match": round(_density_energy_match(diff.notes, phrases), 3),
             "motif_adherence": round(_motif_adherence(diff.notes, phrases), 3),
             "center_clustering": round(_center_clustering(diff.notes), 3),
         }
-        return scores, worst, w1 + w2 + w3 + w4 + w5
+        return scores, worst, w1 + w2 + w3 + w4 + w5 + w6
 
     scores, worst, warnings = run_scores()
     repairs = []
@@ -422,6 +472,7 @@ def validate_and_repair(diff, track, phrases, max_speed_ms, base_per_beat) -> di
         "worst_hand_speed_ms": round(worst, 2),
         "avg_objects_per_sec": round(avg_ops, 2),
         "peak_objects_per_sec": peak_ops,
+        "verdict": _verdict(avg_ops, peak_ops, scores),
         "warnings": warnings[:20],
         "repairs": repairs,
     }

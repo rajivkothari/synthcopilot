@@ -43,6 +43,21 @@ class Rail:
 
 
 @dataclass
+class Wall:
+    """A body-choreography obstacle (lean / duck / gate).
+
+    ``wall_type`` is an SMH wall name (e.g. "angle_left", "crouch");
+    coordinates use the same convention as notes.
+    """
+
+    time: float
+    x: float = 0.0
+    y: float = 1.5
+    wall_type: str = "center"
+    rotation: float = 0.0
+
+
+@dataclass
 class Difficulty:
     name: str
     notes: list = field(default_factory=list)
