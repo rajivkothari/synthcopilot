@@ -218,7 +218,7 @@ def main():
     p_new.add_argument("--density", type=float, default=1.0,
                         help="Scale note density vs. learned style (default: 1.0)")
     p_new.add_argument("--max-hand-speed", type=float, default=6.0,
-                        help="Max hand speed in grid-units/sec — the no-teleport limit (default: 6.0)")
+                        help="Max hand speed in METERS/sec — the no-teleport limit (default: 6.0)")
     p_new.add_argument("--no-rails", action="store_true", help="Place notes only, no rails")
     p_new.add_argument("--seed", type=int, help="RNG seed for reproducible output")
     p_new.add_argument("--name", help="Map name (default: audio filename)")

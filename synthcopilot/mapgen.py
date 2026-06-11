@@ -32,20 +32,26 @@ from synthcopilot.geometry import generate_rail
 from synthcopilot.models import HAND_LEFT, HAND_RIGHT, Note, Rail, TrackData
 from synthcopilot.style import StyleProfile
 
-# Playable extents (our convention: x centered at 0, y floor-relative, chest ~1.5).
-PLAY_X = 2.5
-Y_LO, Y_HI = 0.7, 2.3
+# -- Real Synth Riders scale (from synth_mapping_helper's reference values) --
+# 1 grid square = 0.1365 m. The editor grid is 8 wide x 6 tall (x in ±4,
+# SMH y in ±3 -> our floor-relative y = SMH y + 1.5). Hand-speed limits are
+# meters/second; the "bad mapping" threshold is 6 m/s of arm travel.
+METERS_PER_GRID = 0.1365
+PLAY_X = 4.0
+Y_LO, Y_HI = -1.0, 4.3
+HEAD_CENTER = (0.0, 3.5)   # our coords (SMH (0, 2)) — don't put notes in the face
+HEAD_RADIUS = 1.6
 
-# Per-difficulty character. note_density = notes per beat — kept low so notes
-# fall on *major* beats (rails carry the busy sections). subdiv = how finely
-# note timing may deviate from the beat (2 = down to half-beats). rail_coverage
-# = fraction of the song (by energy) carried by rails.
+# Per-difficulty character. note_density = notes per beat on major beats (rails
+# carry the busy sections). pace_ms = the *average* sustained arm speed (m/s)
+# the choreography aims for — challenge rises with pace, capped well under the
+# 6 m/s teleport threshold. rail_coverage = fraction of song carried by rails.
 DIFFICULTY_PRESETS = {
-    "Easy":   dict(subdiv=1, note_density=0.25, rail_coverage=0.10, max_complexity=2),
-    "Normal": dict(subdiv=1, note_density=0.35, rail_coverage=0.15, max_complexity=3),
-    "Hard":   dict(subdiv=2, note_density=0.45, rail_coverage=0.20, max_complexity=5),
-    "Expert": dict(subdiv=2, note_density=0.55, rail_coverage=0.26, max_complexity=7),
-    "Master": dict(subdiv=2, note_density=0.65, rail_coverage=0.32, max_complexity=9),
+    "Easy":   dict(subdiv=1, note_density=0.25, rail_coverage=0.10, max_complexity=2, pace_ms=0.8),
+    "Normal": dict(subdiv=1, note_density=0.35, rail_coverage=0.15, max_complexity=3, pace_ms=1.1),
+    "Hard":   dict(subdiv=2, note_density=0.45, rail_coverage=0.20, max_complexity=5, pace_ms=1.5),
+    "Expert": dict(subdiv=2, note_density=0.55, rail_coverage=0.26, max_complexity=7, pace_ms=1.9),
+    "Master": dict(subdiv=2, note_density=0.65, rail_coverage=0.32, max_complexity=9, pace_ms=2.4),
 }
 _DEFAULT_PRESET = DIFFICULTY_PRESETS["Expert"]
 
@@ -65,6 +71,9 @@ def generate_map(
     duration_sec: float | None = None,
 ) -> dict:
     """Choreograph ``difficulty`` of ``track_data`` to the audio.
+
+    ``max_hand_speed`` is in **meters/second** (the community's "bad mapping"
+    threshold is 6 m/s of arm travel between consecutive same-hand targets).
 
     Returns a summary dict: notes_added, rails_added, onsets_kept, audio_used.
     """
@@ -113,9 +122,10 @@ def generate_map(
 
     rng = random.Random(seed)
     sec_per_beat = 60.0 / track_data.bpm
+    max_speed_grid = max_hand_speed / METERS_PER_GRID  # m/s -> grid-units/s
     # Rail node-to-node clamp (grid/beat), with headroom so the bidirectional
     # blend can't overshoot the max_hand_speed ceiling.
-    max_vel_per_beat = max_hand_speed * sec_per_beat * 0.82
+    max_vel_per_beat = max_speed_grid * sec_per_beat * 0.82
 
     # --- Rails carry the high-energy sections --------------------------- #
     rails_added = 0
@@ -146,7 +156,7 @@ def generate_map(
     # --- Notes flow through the rest ------------------------------------ #
     notes_added, onsets_kept = _place_flow_notes(
         diff, onsets, energy_fn, covered, track_data, preset,
-        density_scale, max_hand_speed, total_beats, rng,
+        density_scale, max_speed_grid, total_beats, rng,
     )
 
     return {
@@ -211,13 +221,13 @@ def _section_rail(start_beat, end_beat, energy, hand, preset,
         rail_type = "wave"
 
     home = 1.0 if hand == HAND_RIGHT else -1.0
-    # Sweep across more of the space (the modifier swings it further still), but
-    # start and end on the home side so the arm resolves out of any cross before
-    # the next section (no trapped X-formation).
-    sx = home * rng.uniform(0.7, 2.2)
-    ex = home * rng.uniform(0.6, 2.0)
-    sy = rng.uniform(0.9, 2.1)
-    ey = rng.uniform(0.9, 2.1)
+    # Sweep across the real grid (the modifier swings it further still), but
+    # start and end on the home side so the arm resolves out of any cross
+    # before the next section (no trapped X-formation).
+    sx = home * rng.uniform(0.5, 3.2)
+    ex = home * rng.uniform(0.5, 3.0)
+    sy = rng.uniform(0.2, 3.0)
+    ey = rng.uniform(0.2, 3.0)
     num_nodes = max(8, int((end_beat - start_beat) * 3))
 
     nodes = generate_rail(
@@ -228,6 +238,11 @@ def _section_rail(start_beat, end_beat, energy, hand, preset,
         complexity=complexity,
         max_velocity=max_vel_per_beat,  # geometry clamps to no-teleport speed
     )
+    # The game's coordinate math degrades past ~±4.7 grid (SMH's spiral apex);
+    # clamp modifier overshoot into the safe envelope.
+    for nd in nodes:
+        nd.x = min(4.5, max(-4.5, nd.x))
+        nd.y = min(Y_HI, max(Y_LO, nd.y))
     return Rail(hand_type=hand, nodes=nodes)
 
 
@@ -271,10 +286,18 @@ def _place_flow_notes(diff, onsets, energy_fn, covered, track, preset,
         kept.extend(sorted(top, key=lambda c: c[0]))
     kept.sort(key=lambda c: c[0])
 
+    # --- Momentum-arc walk over the FULL grid --------------------------- #
+    # Each hand is a particle with a heading. Every note continues the sweep
+    # with a gradual turn, at the difficulty's target pace (m/s), reflecting
+    # off the grid edges and steering home after cross-overs. This produces
+    # deliberate curved lines that traverse the whole play space — challenge
+    # from continuous momentum, never from disconnected jumps.
     notes_added = 0
     prev_hand = HAND_LEFT
     pos: dict[int, tuple[float, float, float] | None] = {HAND_RIGHT: None, HAND_LEFT: None}
-    crossed: dict[int, bool] = {HAND_RIGHT: False, HAND_LEFT: False}
+    heading: dict[int, float] = {HAND_RIGHT: rng.uniform(0, 2 * math.pi),
+                                 HAND_LEFT: rng.uniform(0, 2 * math.pi)}
+    pace_grid = preset["pace_ms"] / METERS_PER_GRID
 
     for beat, _score, t_sec in kept:
         # Strict alternation per *placed* note — no skips that could double a hand.
@@ -282,36 +305,54 @@ def _place_flow_notes(diff, onsets, energy_fn, covered, track, preset,
         home = 1.0 if hand == HAND_RIGHT else -1.0
         p = pos[hand]
 
-        # Choose a target that uses the WHOLE play space — full width out to the
-        # edges and the full height (low squats to overhead), not a centered
-        # huddle. Hands live on their home side, cross center only occasionally,
-        # and resolve home next note (no trapped X-formation). Because notes are
-        # sparse, there's reach to travel far between them without teleporting.
         if p is None:
-            tx = home * rng.uniform(1.0, 2.3)
-            ty = _sample_height(rng)
+            x = home * 1.5  # the hand's natural neutral (per SMH analysis)
+            y = rng.uniform(1.0, 2.0)
         else:
-            if crossed[hand]:
-                tx = home * rng.uniform(1.2, 2.3)        # resolve back home, outer
-                crossed[hand] = False
-            elif rng.random() < 0.15:
-                tx = -home * rng.uniform(0.6, 2.0)       # deliberate cross-over
-                crossed[hand] = True
-            else:
-                tx = home * rng.uniform(0.9, 2.5)        # home side, biased outward
-            ty = _sample_height(rng)                     # favor low/high over chest
-            # Sweep toward the target, clamped to reachable distance (no
-            # teleport). The 0.95 keeps a little comfort margin under the limit.
             dt = t_sec - p[2]
+            # Step at the difficulty's pace, never past the no-teleport limit,
+            # and never a silly cross-map lunge after a long musical gap.
+            step = min(pace_grid * dt * rng.uniform(0.7, 1.3),
+                       max_hand_speed * dt * 0.95,
+                       5.5)
+            # Sweep: gradual turn, plus steering back toward the home side
+            # whenever the hand is crossed, so cross-overs always resolve.
+            heading[hand] += rng.uniform(-0.8, 0.8)
+            if p[0] * home < 0:
+                # Crossed: point the sweep back at the home side's neutral zone.
+                heading[hand] = math.atan2(rng.uniform(0.5, 2.5) - p[1],
+                                           home * 2.0 - p[0]) + rng.uniform(-0.3, 0.3)
+            x = p[0] + math.cos(heading[hand]) * step
+            y = p[1] + math.sin(heading[hand]) * step
+            # Reflect off the play-space edges (keeps sweeps inside, flowing).
+            if x > PLAY_X or x < -PLAY_X:
+                x = max(-PLAY_X, min(PLAY_X, 2 * math.copysign(PLAY_X, x) - x))
+                heading[hand] = math.pi - heading[hand]
+            if y > Y_HI or y < Y_LO:
+                bound = Y_HI if y > Y_HI else Y_LO
+                y = max(Y_LO, min(Y_HI, 2 * bound - y))
+                heading[hand] = -heading[hand]
+            # Keep notes out of the player's face: push radially out of the
+            # head circle, sideways if the top edge blocks the radial push.
+            hx, hy = x - HEAD_CENTER[0], y - HEAD_CENTER[1]
+            d_head = math.hypot(hx, hy)
+            if d_head < HEAD_RADIUS:
+                f = HEAD_RADIUS / max(d_head, 1e-6)
+                x = HEAD_CENTER[0] + hx * f
+                y = max(Y_LO, min(Y_HI, HEAD_CENTER[1] + hy * f))
+                hy = y - HEAD_CENTER[1]
+                if math.hypot(x - HEAD_CENTER[0], hy) < HEAD_RADIUS:
+                    need = math.sqrt(max(HEAD_RADIUS**2 - hy**2, 0.0))
+                    x = HEAD_CENTER[0] + math.copysign(need, x - HEAD_CENTER[0] or home)
+            # Final safety: never exceed the no-teleport speed to the new spot.
+            d = math.hypot(x - p[0], y - p[1])
             reach = max_hand_speed * dt * 0.95
-            dx, dy = tx - p[0], ty - p[1]
-            dist = math.hypot(dx, dy)
-            if dist > reach and dist > 0:
-                f = reach / dist
-                tx, ty = p[0] + dx * f, p[1] + dy * f
+            if d > reach and d > 0:
+                f = reach / d
+                x, y = p[0] + (x - p[0]) * f, p[1] + (y - p[1]) * f
 
-        x = min(PLAY_X, max(-PLAY_X, tx))
-        y = min(Y_HI, max(Y_LO, ty))
+        x = min(PLAY_X, max(-PLAY_X, x))
+        y = min(Y_HI, max(Y_LO, y))
         diff.notes.append(Note(time=round(beat, 4), x=round(x, 4),
                                y=round(y, 4), hand_type=hand))
         notes_added += 1
@@ -319,17 +360,6 @@ def _place_flow_notes(diff, onsets, energy_fn, covered, track, preset,
         prev_hand = hand
 
     return notes_added, len(kept)
-
-
-def _sample_height(rng) -> float:
-    """Pick a y favoring low squats and overhead reaches over the chest band,
-    so notes don't pile into a horizontal mid-line."""
-    r = rng.random()
-    if r < 0.38:
-        return rng.uniform(Y_LO, 1.15)       # low
-    if r < 0.76:
-        return rng.uniform(1.85, Y_HI)       # high
-    return rng.uniform(1.15, 1.85)           # chest (less often)
 
 
 def _beat_emphasis(qbeat: float) -> float:

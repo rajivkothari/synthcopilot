@@ -148,8 +148,10 @@ def _apply_modifier(
         tangent = direction / length
     normal = np.array([-tangent[1], tangent[0]])
 
-    amplitude = 0.15 + complexity * 0.12
-    amplitude = min(amplitude, 1.5)
+    # Amplitude in editor grid squares (0.1365 m each): up to ~3 squares
+    # (~40 cm) of swoop at max complexity — a real arm swing, not a wiggle.
+    amplitude = 0.3 + complexity * 0.3
+    amplitude = min(amplitude, 3.0)
     freq = 1.0 + complexity * 0.8
 
     for i in range(1, n - 1):
