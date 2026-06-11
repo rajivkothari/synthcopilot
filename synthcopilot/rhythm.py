@@ -176,14 +176,24 @@ def get_audio_duration(audio_path: str) -> float:
 
 
 def analyze_audio(audio_path: str, sensitivity: float = 1.0) -> dict:
-    """Single-pass whole-song analysis for the map generator.
+    """Single-pass whole-song analysis, separating *transient* from *continuous*.
+
+    Splits the signal into percussive and harmonic components (HPSS) so the
+    layout script can map them to different geometry, and tracks spectral
+    brightness for frequency->position placement.
 
     Returns a dict with:
-      * ``duration``      – seconds
-      * ``onsets``        – list of (time_sec, strength in [0,1]) transient events
-      * ``energy_times``  – frame timestamps (seconds) for the energy envelope
-      * ``energies``      – per-frame RMS energy normalized to ~[0,1] (drives
-                            section dynamics: drops/choruses vs. verses)
+      * ``duration``        – seconds
+      * ``onsets``          – (time, strength) PERCUSSIVE transients -> Notes
+                              (snare/kick/staccato hits)
+      * ``energy_times`` / ``energies``   – overall RMS (section dynamics)
+      * ``harmonic``        – per-frame harmonic RMS [0,1] -> where sustained
+                              melodic content lives -> Rails
+      * ``centroid``        – per-frame spectral centroid normalized [0,1]
+                              (0 = bass/low, 1 = bright lead/high) -> drives the
+                              Y/X position so bass stays low-center and leads
+                              pull high-and-outward
+      * ``frame_times``     – timestamps shared by energies/harmonic/centroid
     """
     if librosa is None:
         raise ImportError("librosa is required: pip install librosa soundfile")
@@ -191,26 +201,44 @@ def analyze_audio(audio_path: str, sensitivity: float = 1.0) -> dict:
     y, sr = librosa.load(audio_path, sr=None)
     duration = len(y) / sr if sr else 0.0
 
-    env = librosa.onset.onset_strength(y=y, sr=sr)
-    frames = librosa.onset.onset_detect(
-        y=y, sr=sr, onset_envelope=env,
+    # Separate transient percussion from sustained harmonic content.
+    y_harm, y_perc = librosa.effects.hpss(y)
+
+    # Notes ride the PERCUSSIVE transients (the groove).
+    penv = librosa.onset.onset_strength(y=y_perc, sr=sr)
+    pframes = librosa.onset.onset_detect(
+        y=y_perc, sr=sr, onset_envelope=penv,
         delta=0.07 / max(sensitivity, 0.1),
     )
-    otimes = librosa.frames_to_time(frames, sr=sr)
-    peak = float(env.max()) if env.size else 0.0
+    ptimes = librosa.frames_to_time(pframes, sr=sr)
+    ppeak = float(penv.max()) if penv.size else 0.0
     onsets = [
-        (float(t), float(env[f] / peak) if peak > 0 else 0.0)
-        for t, f in zip(otimes, frames)
+        (float(t), float(penv[f] / ppeak) if ppeak > 0 else 0.0)
+        for t, f in zip(ptimes, pframes)
     ]
 
+    def _norm(arr):
+        ref = float(np.percentile(arr, 95)) if arr.size else 0.0
+        return np.clip(arr / ref, 0.0, 1.0) if ref > 0 else arr
+
     rms = librosa.feature.rms(y=y)[0]
-    etimes = librosa.times_like(rms, sr=sr)
-    ref = float(np.percentile(rms, 95)) if rms.size else 0.0
-    energies = np.clip(rms / ref, 0.0, 1.0) if ref > 0 else rms
+    frame_times = librosa.times_like(rms, sr=sr)
+    energies = _norm(rms)
+    harmonic = _norm(librosa.feature.rms(y=y_harm)[0])
+
+    # Spectral centroid -> "how high is the sound", robustly normalized.
+    cent = librosa.feature.spectral_centroid(y=y, sr=sr)[0]
+    clo, chi = (float(np.percentile(cent, 10)), float(np.percentile(cent, 90))) \
+        if cent.size else (0.0, 1.0)
+    centroid = np.clip((cent - clo) / max(chi - clo, 1e-6), 0.0, 1.0)
 
     return {
         "duration": duration,
         "onsets": onsets,
-        "energy_times": etimes,
+        "energy_times": frame_times,
         "energies": energies,
+        "frame_times": frame_times,
+        "harmonic": harmonic,
+        "centroid": centroid,
     }
+

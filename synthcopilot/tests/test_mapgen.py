@@ -63,6 +63,23 @@ def test_notes_within_playable_bounds():
         assert n.time >= 0.0
 
 
+def test_frequency_drives_height():
+    """Spatial-frequency rule: low brightness -> low notes; high -> high notes."""
+    on = _dense_onsets(30.0)
+    low, high = _track(), _track()
+    generate_map(low, None, StyleProfile.default(), difficulty="Master",
+                 onsets=on, duration_sec=30.0, centroid_fn=lambda s: 0.05, seed=1)
+    generate_map(high, None, StyleProfile.default(), difficulty="Master",
+                 onsets=on, duration_sec=30.0, centroid_fn=lambda s: 0.95, seed=1)
+    import numpy as np
+    low_y = np.mean([n.y for n in low.difficulties["Master"].notes])
+    high_y = np.mean([n.y for n in high.difficulties["Master"].notes])
+    low_x = np.mean([abs(n.x) for n in low.difficulties["Master"].notes])
+    high_x = np.mean([abs(n.x) for n in high.difficulties["Master"].notes])
+    assert high_y > low_y + 0.8, f"bright notes should sit higher ({high_y:.2f} vs {low_y:.2f})"
+    assert high_x > low_x, "bright notes should sit further out"
+
+
 def test_notes_avoid_head_zone():
     from synthcopilot.mapgen import HEAD_CENTER, HEAD_RADIUS
 
