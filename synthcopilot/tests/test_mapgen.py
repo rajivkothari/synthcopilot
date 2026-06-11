@@ -74,10 +74,19 @@ def test_frequency_drives_height():
     import numpy as np
     low_y = np.mean([n.y for n in low.difficulties["Master"].notes])
     high_y = np.mean([n.y for n in high.difficulties["Master"].notes])
-    low_x = np.mean([abs(n.x) for n in low.difficulties["Master"].notes])
-    high_x = np.mean([abs(n.x) for n in high.difficulties["Master"].notes])
     assert high_y > low_y + 0.8, f"bright notes should sit higher ({high_y:.2f} vs {low_y:.2f})"
-    assert high_x > low_x, "bright notes should sit further out"
+
+
+def test_no_center_gravity():
+    """Quadrant weight-shift: notes stay out of the cramped center box."""
+    import numpy as np
+    track = _track()
+    generate_map(track, None, StyleProfile.default(), difficulty="Master",
+                 onsets=_dense_onsets(40.0, 0.1), duration_sec=40.0,
+                 intensity_fn=lambda s: 0.9, seed=4)
+    xs = np.array([n.x for n in track.difficulties["Master"].notes])
+    # The vast majority of notes should sit outside the central |x| < 1 box.
+    assert np.mean(np.abs(xs) >= 1.0) > 0.85, "too many notes clustered center"
 
 
 def test_notes_avoid_head_zone():

@@ -173,6 +173,14 @@ def _apply_modifier(
             offset = sawtooth * amplitude * envelope
             points[i] += normal * offset
 
+        elif rail_type == "staircase":
+            # Angular stepped offset — connected segments that step with the
+            # line (for vocal melisma / pitch runs), never a smooth lazy curve.
+            steps = max(2, int(round(freq)))
+            level = math.floor(t * steps) / max(steps - 1, 1)
+            offset = (level - 0.5) * 2.0 * amplitude * envelope
+            points[i] += normal * offset
+
     return points
 
 

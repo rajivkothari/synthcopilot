@@ -151,6 +151,15 @@ def cmd_new(args):
           f"into {args.difficulty} "
           f"({'audio-gated' if summary['audio_used'] else 'grid-only, no audio analysis'})")
 
+    intent = summary.get("intent", [])
+    if intent:
+        print("\n=== CHOREOGRAPHY INTENT (per 8 bars) ===")
+        for s in intent:
+            print(f"[Sec {s['section']:>2} | bars {s['bars']:>7} | IV {s['intensity']:>4} "
+                  f"{s['tier']:<16}] L:{s['left_hand']:<22} R:{s['right_hand']:<22} "
+                  f"weight: {s['weight_shift']}")
+        print(f"Verification: no continuous loop exceeds {intent[0]['max_loop_beats']} beats.\n")
+
     if not smh_io.HAS_SMH:
         raise SystemExit(
             "synth_mapping_helper is required to write editor-correct .synth files. "

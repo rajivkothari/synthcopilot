@@ -47,6 +47,10 @@ HEAD_RADIUS = 1.6
 NOTE_Y_LOW, NOTE_Y_HIGH = 0.2, 4.0      # bass low -> bright lead high
 NOTE_X_INNER, NOTE_X_OUTER = 0.7, 3.6   # bass central -> lead outward
 
+# Biomechanics. No long loops; quadrant zones force diagonal weight shifts.
+MAX_RAIL_BEATS = 2.0                     # FATAL ERROR 1: never a longer loop
+QUAD_X_MIN = 1.6                         # FATAL ERROR 2: stay out of the center box
+
 # Per-difficulty character. note_density = notes per beat on major beats (rails
 # carry the busy sections). rail_coverage = fraction of song carried by rails.
 # max_complexity = ceiling on rail modifier intensity.
@@ -187,17 +191,25 @@ def generate_map(
         spans = _high_energy_spans(bs, smooth, thresh=thresh)
         hand_cycle = HAND_RIGHT
         for sb, eb, energy in spans:
-            # Pitch motion across the span -> modifier expressiveness.
-            cs = [centroid_fn(track_data.beats_to_seconds(b))
-                  for b in np.linspace(sb, eb, 8)]
-            pitch_motion = float(np.std(cs))
-            rail = _section_rail(sb, eb, energy, pitch_motion, hand_cycle, preset,
-                                 max_vel_per_beat, rng)
-            if rail is not None:
-                diff.rails.append(rail)
-                rails_added += 1
-                covered.append((sb, eb))
-                hand_cycle = HAND_LEFT if hand_cycle == HAND_RIGHT else HAND_RIGHT
+            # NO WASHING MACHINE: a harmonic section is broken into SHORT rails
+            # (<= 2 beats) separated by rests, alternating hands, with angular
+            # modifiers — never one long continuous spiral.
+            seg = sb
+            while seg + 1.0 <= eb:
+                seg_end = min(seg + MAX_RAIL_BEATS, eb)
+                cs = [centroid_fn(track_data.beats_to_seconds(b))
+                      for b in np.linspace(seg, seg_end, 6)]
+                pitch_motion = float(np.std(cs))
+                pitch_dir = 1.0 if cs[-1] >= cs[0] else -1.0  # rising vs falling line
+                rail = _section_rail(seg, seg_end, energy, pitch_motion, pitch_dir,
+                                     hand_cycle, preset, max_vel_per_beat, rng)
+                if rail is not None:
+                    diff.rails.append(rail)
+                    rails_added += 1
+                    covered.append((seg, seg_end))
+                    hand_cycle = HAND_LEFT if hand_cycle == HAND_RIGHT else HAND_RIGHT
+                # Advance past the rail plus a rest gap (negative space).
+                seg = seg_end + rng.uniform(0.5, 1.5)
 
     # --- Notes ride percussive transients, positioned by frequency ------ #
     notes_added, onsets_kept = _place_flow_notes(
@@ -210,7 +222,27 @@ def generate_map(
         "rails_added": rails_added,
         "onsets_kept": onsets_kept,
         "audio_used": audio_used,
+        "intent": _choreography_intent(section_iv),
     }
+
+
+def _choreography_intent(section_iv: list[float]) -> list[dict]:
+    """Per-8-bar Choreography Intent Block: hand layer assignment, weight-shift
+    vector, and the loop-length verification."""
+    blocks = []
+    for i, iv in enumerate(section_iv):
+        flip = (i % 2) == 1  # diagonal flips each phrase
+        left = "Leads / hi-hats (top)" if flip else "Bass / kick (floor)"
+        right = "Bass / kick (floor)" if flip else "Leads / hi-hats (top)"
+        vector = "high-left -> low-right" if flip else "low-left -> high-right"
+        tier = ("chorus/drop" if iv > 7 else "build/mid" if iv > 4 else "verse/breakdown")
+        blocks.append({
+            "section": i + 1, "bars": f"{i * 8 + 1}-{i * 8 + 8}",
+            "intensity": round(iv, 1), "tier": tier,
+            "left_hand": left, "right_hand": right, "weight_shift": vector,
+            "max_loop_beats": MAX_RAIL_BEATS,
+        })
+    return blocks
 
 
 # --------------------------------------------------------------------------- #
@@ -253,34 +285,35 @@ def _high_energy_spans(beats, energy, thresh=0.6, min_beats=3.0, max_beats=8.0):
     return out
 
 
-def _section_rail(start_beat, end_beat, energy, pitch_motion, hand, preset,
-                  max_vel_per_beat, rng) -> Rail | None:
-    """A continuous rail whose modifier reflects the line's pitch motion.
-
-    ``pitch_motion`` (spectral-centroid std over the span) stands in for
-    vibrato / pitch-bends: steady tone -> gentle wave, moving line -> zigzag,
-    wild modulation -> spiral. Complexity scales with energy and motion.
+def _section_rail(start_beat, end_beat, energy, pitch_motion, pitch_dir, hand,
+                  preset, max_vel_per_beat, rng) -> Rail | None:
+    """A SHORT (<= 2 beat) rail that steps with the line's pitch — never a
+    continuous spiral. ``pitch_motion`` (centroid std) picks the angularity;
+    ``pitch_dir`` (+1 rising / -1 falling) sets the climb direction.
     """
-    if end_beat - start_beat < 1.0:
+    length = end_beat - start_beat
+    if length < 0.75:
         return None
-    expressiveness = min(1.0, energy * 0.6 + pitch_motion * 2.0)
+    expressiveness = min(1.0, energy * 0.6 + pitch_motion * 2.5)
     complexity = max(1, int(round(expressiveness * preset["max_complexity"])))
-    if pitch_motion > 0.18:
-        rail_type = "spiral"
-    elif pitch_motion > 0.08:
+    # NO SPIRALS. Moving lines step (staircase), busy lines zigzag, steady glide.
+    if pitch_motion > 0.12:
+        rail_type = "staircase"
+    elif pitch_motion > 0.05:
         rail_type = "zigzag"
     else:
         rail_type = "wave"
 
     home = 1.0 if hand == HAND_RIGHT else -1.0
-    # Sweep across the real grid (the modifier swings it further still), but
-    # start and end on the home side so the arm resolves out of any cross
-    # before the next section (no trapped X-formation).
-    sx = home * rng.uniform(0.5, 3.2)
-    ex = home * rng.uniform(0.5, 3.0)
-    sy = rng.uniform(0.2, 3.0)
-    ey = rng.uniform(0.2, 3.0)
-    num_nodes = max(8, int((end_beat - start_beat) * 3))
+    # The rail starts on the hand's home side and climbs/descends with the pitch
+    # (rising line sweeps upward), resolving back home-side by the end.
+    sx = home * rng.uniform(1.2, 3.0)
+    ex = home * rng.uniform(1.0, 2.8)
+    if pitch_dir >= 0:
+        sy, ey = rng.uniform(0.2, 1.5), rng.uniform(2.2, 3.6)   # climb
+    else:
+        sy, ey = rng.uniform(2.2, 3.6), rng.uniform(0.2, 1.5)   # descend
+    num_nodes = max(6, int(length * 4))
 
     nodes = generate_rail(
         start=(sx, sy, start_beat),
@@ -370,56 +403,52 @@ def _place_flow_notes(diff, onsets, snares, centroid_fn, intensity_at, covered,
         kept.extend(sorted(top, key=lambda c: c[0]))
     kept.sort(key=lambda c: c[0])
 
-    # --- Frequency-driven targets, hard reach boundaries ---------------- #
+    # --- Quadrant weight-shift placement (no center gravity) ------------ #
+    # Each hand owns an opposite quadrant (Left low-left / Right high-right by
+    # default), flipping the diagonal every 8 bars. Alternating notes therefore
+    # snap corner-to-corner — a real left/right + low/high body weight shift,
+    # never a centered T-Rex huddle. Brightness nudges height within the zone.
     notes_added = 0
     prev_hand = HAND_LEFT
     pos: dict[int, tuple[float, float, float] | None] = {HAND_RIGHT: None, HAND_LEFT: None}
-    crossed: dict[int, bool] = {HAND_RIGHT: False, HAND_LEFT: False}
 
     for beat, _score, t_sec in kept:
-        # Rubber-band: section intensity (1..10) scales how far the target zone
-        # spreads from a tight central box (verse) to the full grid (chorus).
         iv = intensity_at(beat)
-        spread = 0.20 + 0.80 * (iv - 1.0) / 9.0     # 0.2 (tight) .. 1.0 (full)
-        b = max(0.0, min(1.0, centroid_fn(t_sec)))   # brightness -> zone
-        ty_full = NOTE_Y_LOW + b * (NOTE_Y_HIGH - NOTE_Y_LOW)
-        mag_full = NOTE_X_INNER + b * (NOTE_X_OUTER - NOTE_X_INNER)
-        ty = 1.8 + (ty_full - 1.8) * spread          # compress toward chest
-        mag = 0.6 + (mag_full - 0.6) * spread        # compress toward center
+        spread = 0.25 + 0.75 * (iv - 1.0) / 9.0      # tight verse .. wide chorus
+        b = max(0.0, min(1.0, centroid_fn(t_sec)))    # brightness
 
-        # SNARE SHATTER: strong backbeat -> both hands fling apart, outward.
-        # Reserved for higher-intensity sections so quiet verses stay tight.
+        # SNARE SHATTER: strong backbeat -> both hands fling apart (the one
+        # allowed symmetric two-handed impact). Otherwise no mirroring.
         if beat in shatter_beats and iv > 4.5:
-            placed_any = False
+            ty = 1.0 + 2.0 * b
             for h, hm in ((HAND_LEFT, -1.0), (HAND_RIGHT, 1.0)):
-                tx2 = hm * max(2.0, mag) + hm * 0.4 * spread
+                tx2 = hm * (2.2 + 1.2 * spread)
                 x2, y2 = _reach_clamp(tx2, ty, pos[h], t_sec, max_hand_speed, hm)
                 diff.notes.append(Note(time=round(beat, 4), x=round(x2, 4),
                                        y=round(y2, 4), hand_type=h))
                 pos[h] = (x2, y2, t_sec)
                 notes_added += 1
-                placed_any = True
-            if placed_any:
-                prev_hand = HAND_RIGHT  # next single note starts on the left
-                continue
+            prev_hand = HAND_RIGHT
+            continue
 
-        # Strict alternation per *placed* note — no skips that could double a hand.
         hand = HAND_RIGHT if prev_hand == HAND_LEFT else HAND_LEFT
-        home = 1.0 if hand == HAND_RIGHT else -1.0
+        # Diagonal flips each 8-bar phrase so it isn't monotonous.
+        flip = (int(beat // 32.0) % 2) == 1
+        low_hand = HAND_RIGHT if flip else HAND_LEFT   # which hand works the floor
+        x_side = -1.0 if hand == HAND_LEFT else 1.0    # Left -> left, Right -> right
 
-        # Side: home, except a deliberate cross-body that resolves next note.
-        if crossed[hand]:
-            side = home
-            crossed[hand] = False
-        elif rng.random() < 0.13 and iv > 4.0:       # cross-body on busier sections
-            side = -home
-            crossed[hand] = True
+        # Vertical: this hand's quadrant (low vs high), nudged by brightness.
+        if hand == low_hand:
+            ty = 0.3 + 1.2 * b                          # bottom band (bass)
         else:
-            side = home
-        tx = side * mag + rng.uniform(-0.35, 0.35) * spread
-        tyj = ty + rng.uniform(-0.25, 0.25) * spread
+            ty = 2.6 + 1.2 * b                          # top band (leads/hats)
 
-        x, y = _reach_clamp(tx, tyj, pos[hand], t_sec, max_hand_speed, home)
+        # Horizontal: out of the center box, scaled outward by intensity.
+        mag = QUAD_X_MIN + (3.4 - QUAD_X_MIN) * spread
+        tx = x_side * mag + rng.uniform(-0.3, 0.3)
+        ty += rng.uniform(-0.25, 0.25)
+
+        x, y = _reach_clamp(tx, ty, pos[hand], t_sec, max_hand_speed, x_side)
         diff.notes.append(Note(time=round(beat, 4), x=round(x, 4),
                                y=round(y, 4), hand_type=hand))
         notes_added += 1
