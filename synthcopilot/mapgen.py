@@ -102,18 +102,24 @@ def generate_map(
         raise ValueError(f"Difficulty '{difficulty}' not found in track")
     preset = dict(DIFFICULTY_PRESETS.get(difficulty, _DEFAULT_PRESET))
 
-    # A *learned* style profile (--learn-from / --profile) modulates DENSITY and
-    # RAIL balance toward the example maps (clamped so it nudges, never breaks
-    # the difficulty). Position/rhythm are gesture-driven, so the profile's
-    # spatial Markov is intentionally not used here.
+    # A *learned* style profile (--learn-from / --profile) modulates DENSITY,
+    # RAIL balance, and high-level movement TENDENCIES (which dance primitives
+    # are favored). Placement itself stays gesture-driven — the profile never
+    # dictates positions.
     style_info = ""
+    style_hints: dict = {}
     if getattr(style, "source_maps", 0) > 0:
         df = min(1.5, max(0.7, style.notes_per_beat / 1.0))
         rf = min(1.6, max(0.5, style.rail_rate / 0.04)) if style.rail_rate else 1.0
         density_scale *= df
         preset["rail_coverage"] = min(0.6, preset["rail_coverage"] * rf)
-        style_info = (f"applied learned profile: density x{df:.2f}, "
-                      f"rail x{rf:.2f} (from {style.source_maps} map(s))")
+        style_hints = style.movement_hints() if hasattr(style, "movement_hints") else {}
+        if style_hints.get("mirrored"):
+            preset["shatter_thresh"] = 0.45   # more mirrored accents fire
+        hint_str = ", ".join(k for k, v in style_hints.items() if v) or "neutral"
+        style_info = (f"applied learned profile: density x{df:.2f}, rail x{rf:.2f}, "
+                      f"movement tendencies: {hint_str} "
+                      f"(from {style.source_maps} map(s))")
 
     # --- Resolve audio analysis (injectable for tests) ------------------ #
     audio_used = False
@@ -177,10 +183,15 @@ def generate_map(
     def intensity_at(beat: float) -> float:
         return section_iv[min(int(beat // 32.0), len(section_iv) - 1)] if section_iv else 5.0
 
-    # --- B. Phrase map: sections, grammar, motifs ------------------------ #
+    # --- B+C. Phrase map + movement plan ---------------------------------- #
+    from synthcopilot.dance import select_primitive
     from synthcopilot.phrases import build_phrase_map
 
     phrases = build_phrase_map(section_iv, seed=seed or 0)
+    for ph in phrases:
+        # The planner commits each phrase to ONE dance primitive (energy-
+        # filtered, learned-tendency-biased) before any object is emitted.
+        ph.groove = select_primitive(ph, style_hints)
 
     # No audio onsets -> synthesize a plain beat grid so it still produces output.
     if not onsets:
@@ -502,7 +513,7 @@ def _place_flow_notes(diff, onsets, snares, centroid_fn, intensity_at, phrases,
     if snares:
         smax = max(s for _, s in snares) or 1.0
         for t_sec, strength in snares:
-            if strength / smax >= 0.55:
+            if strength / smax >= preset.get("shatter_thresh", 0.55):
                 shatter_beats.add(round(round(track.seconds_to_beats(t_sec) * 2) / 2, 4))
 
     # Quantize onsets to the grid, dedupe per slot keeping the strongest. The

@@ -166,7 +166,12 @@ center 6%, GrooveScore 0.89, rails 0% straight). Latest additions:
 correction; export gate), **Intro Rail Mode** (`rail_mode="long"` phrases are
 rail-first with calm downbeat anchors), **PostWallRecoveryModel** (walls placed
 before notes; recovery windows constrain post-wall targets; `wall_recovery`
-score), and A/A/A'/B bar variation in the dance pass. Open work: richer wall
-vocabulary, true vocal-stem rails (needs Demucs), more groove families, and the
+score), and A/A/A'/B bar variation in the dance pass. `dance.py` is now a
+**MovementPrimitive library** (11 primitives with metadata: 9 positional
+gestures + 2 structural, energy-filtered per phrase, biased by learned
+movement *tendencies* via `StyleProfile.movement_hints()` — tendencies only,
+never positions). The evaluator scores a per-phrase **DanceMovementScore**
+(groove + sweep + rail expressiveness) and fails weak-movement maps. Open
+work: richer wall vocabulary, true vocal-stem rails (needs Demucs), and the
 standing caveat that **no generated map has been play-tested in VR** — the
 evaluator is a proxy for fun, not proof of it.

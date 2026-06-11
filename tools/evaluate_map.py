@@ -327,7 +327,28 @@ def m_groove(objs, n_phrases, bpm):
             len({round(o.beat, 2) for o in last_bar}) < len(last_bar)
         gs = (0.22 * lock + 0.20 * repeat + 0.16 * relate + 0.18 * cen_ok
               + 0.14 * dance + 0.10 * (1.0 if payoff else 0.0))
-        rows.append({"phrase": p, "groove": round(gs, 2), "lock": round(float(lock), 2),
+
+        # DanceMovementScore = groove + SWEEP (per-hand travel for the phrase
+        # length) + rail EXPRESSIVENESS (curved span, not straight connectors).
+        n_bars = PHRASE_BEATS / 4.0
+        travel = 0.0
+        for hand in (0, 1):
+            seq = sorted([o for o in po if o.hand == hand], key=lambda o: o.beat)
+            travel += sum(math.hypot(b2.x - a.x, b2.y - a.y)
+                          for a, b2 in zip(seq, seq[1:]))
+        sweep = min(1.0, travel / (n_bars * 7.0))
+        prails = [o for o in po if o.kind == "rail"]
+        if prails:
+            spans = [max(n[0] for n in r.nodes) - min(n[0] for n in r.nodes)
+                     for r in prails]
+            rail_expr = min(1.0, float(np.mean(spans)) / 4.0)
+        else:
+            rail_expr = 0.6 if len(po) >= 8 else 1.0   # note phrases: mild ask
+        dms = 0.55 * gs + 0.25 * sweep + 0.20 * rail_expr
+
+        rows.append({"phrase": p, "groove": round(gs, 2), "dance": round(dms, 2),
+                     "sweep": round(sweep, 2), "rail_expr": round(rail_expr, 2),
+                     "lock": round(float(lock), 2),
                      "repeat": round(repeat, 2), "relate": round(relate, 2),
                      "center": round(center, 2), "lateral": round(lateral, 1),
                      "payoff": payoff})
@@ -336,9 +357,16 @@ def m_groove(objs, n_phrases, bpm):
                          f"(repeat {repeat:.2f}, center {center:.0%}, "
                          f"payoff {'y' if payoff else 'N'})")
     avg = float(np.mean([r["groove"] for r in rows])) if rows else 0.0
+    dance_avg = float(np.mean([r["dance"] for r in rows])) if rows else 0.0
+    weak = [r["phrase"] for r in rows if r["dance"] < 0.55]
     if avg < 0.6:
         fails.append(f"average GrooveScore {avg:.2f} < 0.60")
-    return {"rows": rows, "avg": round(avg, 2)}, fails
+    if rows and (dance_avg < 0.6 or len(weak) > 0.3 * len(rows)):
+        fails.append(f"DanceMovementScore weak: avg {dance_avg:.2f}, "
+                     f"{len(weak)}/{len(rows)} phrases below 0.55 "
+                     f"(phrases {weak[:6]})")
+    return {"rows": rows, "avg": round(avg, 2),
+            "dance_avg": round(dance_avg, 2)}, fails
 
 
 def m_counterpoint(objs, n_phrases):
@@ -440,6 +468,9 @@ def plot_phrases(objs, walls, n_phrases, rows, outdir):
                     ax.plot([n[0] for n in o.nodes], [n[1] for n in o.nodes],
                             color=color, lw=4, alpha=0.9)
         ax.add_patch(plt.Circle(HEAD, 1.6, fill=False, color='#8888aa', ls=':'))
+        # Center-zone overlay: dance choreography should mostly stay OUT of it.
+        ax.add_patch(plt.Rectangle((-1.0, 1.3), 2.0, 1.1, fill=False,
+                                   color='#665533', ls='--', lw=1.0))
         r = rows[p]
         ax.set_xlim(-4.5, 4.5); ax.set_ylim(-1.5, 4.8)
         ax.set_title(f"phrase {p} — {r['label']}\n{r['ops']} obj/s | "
@@ -491,13 +522,15 @@ def evaluate(path, bpm, make_plots, outdir):
     print(f"[6] COUNTERPOINT rail_support={cp['rail_support_frac']:.0%}")
     print(f"[7] DROP verse={drop['verse_ops']}obj/s/{drop['verse_width']}u  "
           f"drop={drop['drop_ops']}obj/s/{drop['drop_width']}u")
-    print(f"[G] GROOVESCORE avg={groove['avg']}")
-    print("\n[5] PHRASE CHOREOGRAPHY + GROOVE:")
+    print(f"[G] GROOVESCORE avg={groove['avg']}  "
+          f"DANCEMOVEMENT avg={groove.get('dance_avg', '-')}")
+    print("\n[5] PHRASE CHOREOGRAPHY + DANCE:")
     gmap = {g["phrase"]: g for g in groove["rows"]}
     for r in rows:
         g = gmap.get(r["phrase"], {})
-        gs = f"groove={g.get('groove', '-'):<4} repeat={g.get('repeat', '-')} " \
-             f"payoff={'Y' if g.get('payoff') else 'n'}" if g else ""
+        gs = (f"dance={g.get('dance', '-'):<4} sweep={g.get('sweep', '-'):<4} "
+              f"repeat={g.get('repeat', '-')} "
+              f"payoff={'Y' if g.get('payoff') else 'n'}") if g else ""
         print(f"    p{r['phrase']:>2} {r['label']:<24} {r['ops']:>4}o/s "
               f"lat={r['lateral']:>4} center={r['center_frac']:.0%}  {gs}")
     print("\nFAILURES:")

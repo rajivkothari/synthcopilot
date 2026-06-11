@@ -254,7 +254,7 @@ def _print_debug_report(summary, track, bpm, offset, difficulty):
                   f"calibration: {', '.join(corr) if corr else 'none needed'}")
 
     if phrases:
-        from synthcopilot.dance import groove_for, payoff_for
+        from synthcopilot.dance import body_for, groove_for, payoff_for
 
         print("\n--- CHOREOGRAPHY PLAN (per 8-bar phrase) ---")
         for ph in phrases:
@@ -262,8 +262,7 @@ def _print_debug_report(summary, track, bpm, offset, difficulty):
             print(f"  [{t0:6.1f}s | bars {ph.index*8+1:>3}-{ph.index*8+8:<3}] "
                   f"{ph.label:<10} IV={ph.intensity:>4.1f}  groove={groove_for(ph):<15} "
                   f"motif={ph.stance_name} occ {ph.occurrence + 1}")
-            print(f"           body: {ph.body};  hands: {ph.relationship};  "
-                  f"payoff: {payoff_for(ph)}")
+            print(f"           body: {body_for(ph)};  payoff: {payoff_for(ph)}")
     if report:
         print("\n--- QUALITY SCORES (threshold-gated) ---")
         for k, v in report["scores"].items():

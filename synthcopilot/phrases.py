@@ -108,6 +108,7 @@ class Phrase:
     fill: bool = False
     wall: bool = False
     rail_mode: str = "sweep"
+    groove: str = ""                 # movement primitive chosen by the planner
     body: str = ""
     relationship: str = ""
     spread_boost: float = 0.0        # motif evolution: later choruses go wider

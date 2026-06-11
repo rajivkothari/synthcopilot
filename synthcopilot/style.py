@@ -80,7 +80,22 @@ class StyleProfile:
     rail_length_beats: float = 4.0
     # markov[hand][from_cell] -> {to_cell: weight}
     markov: dict = field(default_factory=dict)
+    mirror_rate: float = 0.0         # fraction of notes in same-beat L+R pairs
     source_maps: int = 0
+
+    def movement_hints(self) -> dict:
+        """High-level movement TENDENCIES from the learned corpus — used only
+        to bias which dance primitives get picked, never to place objects.
+        Empty when nothing was learned."""
+        if self.source_maps <= 0:
+            return {}
+        wide_mass = sum(h for cell, h in enumerate(self.position_hist)
+                        if abs(center_of(cell)[0]) >= 2.0)
+        return {
+            "raily": self.rail_rate > 0.06,
+            "wide": wide_mass > 0.35,
+            "mirrored": self.mirror_rate > 0.08,
+        }
 
     # ------------------------------------------------------------------ #
     #  Sampling                                                            #
@@ -143,6 +158,7 @@ class StyleProfile:
             "rail_rate": self.rail_rate,
             "rail_length_beats": self.rail_length_beats,
             "markov": self.markov,
+            "mirror_rate": self.mirror_rate,
             "source_maps": self.source_maps,
             "grid": {"nx": NX, "ny": NY, "cell": CELL},
         }
@@ -163,6 +179,7 @@ class StyleProfile:
             rail_rate=d.get("rail_rate", 0.04),
             rail_length_beats=d.get("rail_length_beats", 4.0),
             markov=d.get("markov", {}),
+            mirror_rate=d.get("mirror_rate", 0.0),
             source_maps=d.get("source_maps", 0),
         )
 
@@ -218,6 +235,7 @@ class StyleProfile:
         alt_pairs = 0
         total_rails = 0
         rail_len_sum = 0.0
+        mirror_notes = 0
         maps_used = 0
         maps_parsed = 0
         parse_failures: list[tuple[str, str]] = []
@@ -261,6 +279,13 @@ class StyleProfile:
                         key = str(c)
                         row[key] = row.get(key, 0) + 1
                     last_cell_by_hand[n.hand_type] = c
+
+                # Mirrored accents: both hands hitting the same beat.
+                times_by_beat: dict[float, set] = {}
+                for n in notes:
+                    times_by_beat.setdefault(round(n.time, 3), set()).add(n.hand_type)
+                mirror_notes += sum(2 for hands in times_by_beat.values()
+                                    if len(hands) >= 2)
 
                 for r in diff.rails:
                     total_rails += 1
@@ -308,6 +333,7 @@ class StyleProfile:
             rail_rate=(total_rails / total_beat_span) if total_beat_span > 0 else 0.0,
             rail_length_beats=(rail_len_sum / total_rails) if total_rails else 4.0,
             markov=markov,
+            mirror_rate=mirror_notes / total_notes,
             source_maps=maps_used,
         )
 
