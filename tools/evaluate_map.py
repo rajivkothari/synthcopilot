@@ -305,7 +305,6 @@ def _bar_motif_repeat(seq):
 def m_groove(objs, n_phrases, bpm):
     """[GrooveScore] per phrase: beat lock, motif repetition, L/R relationship,
     payoff, center gravity, and dance feel (lateral travel)."""
-    spb = 60.0 / bpm
     rows = []
     fails = []
     for p in range(n_phrases):

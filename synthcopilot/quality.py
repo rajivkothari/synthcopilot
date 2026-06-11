@@ -306,21 +306,17 @@ def _motif_adherence(notes, phrases):
     """
     if not notes:
         return 1.0
-    from synthcopilot.paths import make_path
+    from synthcopilot.dance import dance_position
     from synthcopilot.phrases import phrase_at
 
-    cache: dict[tuple[int, int], object] = {}
     ok = 0
     for n in notes:
         ph = phrase_at(phrases, n.time)
         spread = min(0.30 + 0.70 * (ph.intensity - 1.0) / 9.0 + ph.spread_boost, 1.0)
-        key = (ph.index, n.hand_type)
-        if key not in cache:
-            cache[key] = make_path(ph, n.hand_type, spread)
-        px, py = cache[key](n.time)
+        px, py, _role = dance_position(ph, n.hand_type, n.time, spread, 0.5)
         dx = abs(n.x - px)
-        dy = max(0.0, abs(n.y - py) - 0.75)   # brightness lift allowance
-        ok += math.hypot(dx, dy) <= 1.6       # jitter + shatter fling + clamps
+        dy = max(0.0, abs(n.y - py) - 1.5)    # brightness + center-limiter allowance
+        ok += math.hypot(dx, dy) <= 2.2       # gesture + accent + clamp tolerance
     return ok / len(notes)
 
 

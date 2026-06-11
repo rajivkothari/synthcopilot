@@ -1,8 +1,21 @@
 # SynthCoPilot
 
-Semi-automated beatmap generation tool for [Synth Riders](https://synthridersvr.com/).
+Turns a song into an **authored Master-difficulty** beatmap for
+[Synth Riders](https://synthridersvr.com/) — not an automapper. It understands
+the song's structure, plans repeated dance grooves per phrase, places notes as
+checkpoints on continuous hand gestures, draws expressive rails, adds body-
+movement walls, then **validates the result against objective Master thresholds
+and refuses to export anything below Master.** Ships a CLI, a synthwave GUI, and
+an independent evaluation harness.
 
-Generates rail geometry (Bezier curves with wave/spiral/zigzag modifiers), snaps notes to audio onsets via librosa, and enforces physical playability constraints (cooldown threshold, velocity gate). Includes both a CLI and a dark synthwave-themed GUI.
+> **New here / handing off?** Read **[`CLAUDE.md`](CLAUDE.md)** (operating guide)
+> and **[`docs/METHODOLOGY.md`](docs/METHODOLOGY.md)** (the full pipeline and how
+> to reproduce it on any song). They are the source of truth; this README is the
+> quickstart.
+
+### Pipeline
+`analyze audio → detect phrases → choreography plan → groove gestures →
+rhythm slots → notes/rails/walls → validate & repair → export → debug report`
 
 ## Install
 
@@ -101,21 +114,38 @@ Generation acts as a VR *choreographer*, not a beat-matcher — it prioritizes
 > Honest scope: this produces a strong, on-beat, *interesting starting
 > skeleton* — not a finished pro map. Polish happens in the editor.
 
+## Evaluate any map (the arbiter)
+
+Map quality is gated by an independent harness, not opinion. It reads only the
+exported `.synth` and scores density, playfield usage, rail shape, per-phrase
+groove, counterpoint, and the verse-vs-drop payoff:
+
+```bash
+python tools/evaluate_map.py --input song.synth --difficulty Master \
+    --style beastmode --bpm 123 --plots   # plots -> debug/phrases/
+```
+Exit code is non-zero unless the verdict is Master/Master Plus. **Any quality
+change starts by making the failure show up here** — see `CLAUDE.md`.
+
 ## Testing
 
 ```bash
-python -m pytest synthcopilot/tests/ -q
+pip install pytest
+python -m pytest synthcopilot/tests/ -q   # 76+ tests, keep green
 ```
 
 ## Architecture
 
 | Module | Purpose |
 |--------|---------|
-| `smh_io.py` | The single `.synth` I/O layer — editor-correct read/write via `synth_mapping_helper` (our models ↔ SMH `SynthFile`/`DataContainer`), map skeletons (`new_track`), and real-map style learning |
-| `geometry.py` | Cubic Bezier rail generation with smoothstep envelope and bidirectional velocity clamping |
-| `rhythm.py` | librosa onset detection, whole-song onset envelope, cooldown filtering, velocity-gated note snapping |
-| `style.py` | Learn a style profile (density, position heatmap, hand cadence, per-hand Markov flow) from a folder of maps; JSON save/load; built-in defaults |
-| `mapgen.py` | Full-song map generator: beat grid × onset gating × Markov flow, with reach/cooldown constraints and rails |
-| `models.py` | Dataclasses for Note, Rail, RailNode, Wall, Difficulty, TrackData |
-| `cli.py` | argparse CLI with `inspect`, `generate`, and `new` subcommands |
-| `gui.py` | customtkinter dark synthwave GUI |
+| `rhythm.py` | **Analyze** — `analyze_audio`: HPSS (percussion→notes / harmonic→rails), onsets, energy, intensity, spectral centroid, snare band |
+| `phrases.py` | **Plan** — 8-bar sections from the song's intensity, pattern grammar, recurring + evolving motifs |
+| `dance.py` | **Choreograph** — per-bar groove gestures (side-to-side / push-pull / wave / open-close / climb / drop-expansion), A/A/A'/B motif structure |
+| `mapgen.py` | **Generate** — rhythm slots → notes on gestures, shaped rails, counterpoint, walls; orchestrates the pipeline |
+| `quality.py` | **Validate + repair** — hand-flow / rail / groove / playability scoring, repairs, difficulty verdict |
+| `geometry.py` | Low-level rail curve math (Bezier + wave/zigzag/staircase modifiers) |
+| `smh_io.py` | The single `.synth` I/O layer — editor-correct read/write via `synth_mapping_helper` |
+| `models.py` | Dataclasses: Note, Rail, RailNode, Wall, Difficulty, TrackData |
+| `style.py` | Optional: learn a style profile from a folder of real maps (`--learn-from`) |
+| `cli.py` / `gui.py` | CLI (`inspect`/`generate`/`new` + debug report) and the synthwave GUI |
+| `tools/evaluate_map.py` | The independent Master-map evaluator |
