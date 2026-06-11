@@ -226,15 +226,44 @@ def analyze_audio(audio_path: str, sensitivity: float = 1.0) -> dict:
     energies = _norm(rms)
     harmonic = _norm(librosa.feature.rms(y=y_harm)[0])
 
-    # Spectral centroid -> "how high is the sound", robustly normalized.
-    cent = librosa.feature.spectral_centroid(y=y, sr=sr)[0]
+    # Spectral content for centroid (brightness) and high-frequency density.
+    S = np.abs(librosa.stft(y))
+    freqs = librosa.fft_frequencies(sr=sr)
+    stimes = librosa.times_like(S, sr=sr)
+    cent = librosa.feature.spectral_centroid(S=S, sr=sr)[0]
     clo, chi = (float(np.percentile(cent, 10)), float(np.percentile(cent, 90))) \
         if cent.size else (0.0, 1.0)
     centroid = np.clip((cent - clo) / max(chi - clo, 1e-6), 0.0, 1.0)
 
+    # High-frequency density (>2 kHz) -> "brightness energy" for intensity.
+    hi_mask = freqs >= 2000.0
+    hi = S[hi_mask].sum(axis=0) if hi_mask.any() else np.zeros(S.shape[1])
+    hi_n = np.interp(frame_times, stimes, _norm(hi))
+    # Intensity vector = loud AND bright (drives the rubber-band expansion).
+    intensity = np.clip(0.6 * energies + 0.4 * hi_n, 0.0, 1.0)
+
+    # Snare/backbeat trigger: isolate ~200-400 Hz for the dual-note "shatters".
+    snares = []
+    try:
+        from scipy.signal import butter, sosfiltfilt
+
+        sos = butter(4, [200.0, 400.0], btype="band", fs=sr, output="sos")
+        y_snare = sosfiltfilt(sos, y).astype(np.float32)
+        senv = librosa.onset.onset_strength(y=y_snare, sr=sr)
+        sfr = librosa.onset.onset_detect(y=y_snare, sr=sr, onset_envelope=senv,
+                                         delta=0.12 / max(sensitivity, 0.1))
+        st = librosa.frames_to_time(sfr, sr=sr)
+        speak = float(senv.max()) if senv.size else 0.0
+        snares = [(float(t), float(senv[f] / speak) if speak > 0 else 0.0)
+                  for t, f in zip(st, sfr)]
+    except Exception:
+        pass  # snare isolation is an enhancement; fall back to no shatters
+
     return {
         "duration": duration,
         "onsets": onsets,
+        "snares": snares,
+        "intensity": intensity,
         "energy_times": frame_times,
         "energies": energies,
         "frame_times": frame_times,

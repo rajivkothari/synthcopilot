@@ -74,6 +74,8 @@ def generate_map(
     energy_fn: Callable[[float], float] | None = None,
     centroid_fn: Callable[[float], float] | None = None,
     rail_energy_fn: Callable[[float], float] | None = None,
+    intensity_fn: Callable[[float], float] | None = None,
+    snares: list[tuple[float, float]] | None = None,
     duration_sec: float | None = None,
 ) -> dict:
     """Choreograph ``difficulty`` of ``track_data`` to the audio.
@@ -112,6 +114,11 @@ def generate_map(
             if centroid_fn is None and len(ftimes):
                 _cent = info["centroid"]
                 centroid_fn = lambda s: float(np.interp(s, ftimes, _cent))  # noqa: E731
+            if intensity_fn is None and len(ftimes):
+                _inten = info["intensity"]
+                intensity_fn = lambda s: float(np.interp(s, ftimes, _inten))  # noqa: E731
+            if snares is None:
+                snares = info.get("snares", [])
             if duration_sec is None:
                 duration_sec = info["duration"]
             audio_used = True
@@ -133,8 +140,21 @@ def generate_map(
         rail_energy_fn = energy_fn  # rails fall back to overall energy
     if centroid_fn is None:
         centroid_fn = lambda s: 0.5  # noqa: E731  (mid — no frequency info)
+    if intensity_fn is None:
+        intensity_fn = lambda s: 0.5  # noqa: E731  (flat — no rubber-band)
+    if snares is None:
+        snares = []
 
     total_beats = max(track_data.seconds_to_beats(track_data.offset + duration_sec), 1.0)
+
+    # --- Intensity vector per 8-bar section (the rubber-band) ----------- #
+    # Average intensity over each 32-beat chunk, scaled 1..10 against the song's
+    # own range so verses compress to a tight central box and choruses expand
+    # to the full grid. A stable per-section value avoids flickering.
+    section_iv = _section_intensities(intensity_fn, track_data, total_beats)
+
+    def intensity_at(beat: float) -> float:
+        return section_iv[min(int(beat // 32.0), len(section_iv) - 1)] if section_iv else 5.0
 
     # No audio onsets -> synthesize a plain beat grid so it still produces output.
     if not onsets:
@@ -181,8 +201,8 @@ def generate_map(
 
     # --- Notes ride percussive transients, positioned by frequency ------ #
     notes_added, onsets_kept = _place_flow_notes(
-        diff, onsets, energy_fn, centroid_fn, covered, track_data, preset,
-        density_scale, max_speed_grid, total_beats, rng,
+        diff, onsets, snares, centroid_fn, intensity_at, covered, track_data,
+        preset, density_scale, max_speed_grid, total_beats, rng,
     )
 
     return {
@@ -282,16 +302,43 @@ def _section_rail(start_beat, end_beat, energy, pitch_motion, hand, preset,
 #  Velocity-clamped, home-resolving note flow                                  #
 # --------------------------------------------------------------------------- #
 
-def _place_flow_notes(diff, onsets, energy_fn, centroid_fn, covered, track, preset,
-                      density_scale, max_hand_speed, total_beats, rng):
-    """Place notes on percussive transients, positioned by FREQUENCY.
+def _section_intensities(intensity_fn, track, total_beats, chunk_beats=32.0):
+    """Per-8-bar intensity vectors, scaled 1..10 against the song's own range."""
+    n = max(1, int(math.ceil(total_beats / chunk_beats)))
+    means = []
+    for c in range(n):
+        sb, eb = c * chunk_beats, min((c + 1) * chunk_beats, total_beats)
+        samples = [intensity_fn(track.beats_to_seconds(b))
+                   for b in np.linspace(sb, eb, 12)]
+        means.append(float(np.mean(samples)))
+    arr = np.array(means)
+    lo, hi = float(np.percentile(arr, 10)), float(np.percentile(arr, 90))
+    if hi - lo < 0.05:  # ~no dynamics (or flat/injected) -> neutral mid spread
+        return [5.5] * len(means)
+    scaled = 1.0 + 9.0 * np.clip((arr - lo) / (hi - lo), 0.0, 1.0)
+    return scaled.tolist()
 
-    Spectral brightness (``centroid_fn``: 0 = bass, 1 = bright lead) maps to a
-    target zone — bass low and central, leads high and outward — and the hand
-    sweeps toward that zone bounded by the hard reach limit, so position is
-    musically meaningful yet always physically playable.
+
+def _place_flow_notes(diff, onsets, snares, centroid_fn, intensity_at, covered,
+                      track, preset, density_scale, max_hand_speed, total_beats, rng):
+    """Place notes on percussive transients, positioned by FREQUENCY and scaled
+    by sectional INTENSITY (rubber-band: tight verses, expansive choruses).
+
+    Brightness (``centroid_fn``) sets the target zone; the section's intensity
+    vector (1..10) scales how far that zone spreads from center. Strong snare
+    hits become dual-note "shatters" that fling both hands apart. Every target
+    is clamped to the hard reach limit, so it stays physically playable.
     """
     subdiv = preset["subdiv"]
+    # Strong snare beats -> dual-note shatters (quantized, top half by strength).
+    shatter_beats: set[float] = set()
+    if snares:
+        smax = max(s for _, s in snares) or 1.0
+        for t_sec, strength in snares:
+            if strength / smax >= 0.55:
+                qb = round(track.seconds_to_beats(t_sec) * subdiv) / subdiv
+                if not _in_spans(qb, covered):
+                    shatter_beats.add(qb)
 
     # Quantize onsets to the grid, dedupe per slot keeping the strongest, and
     # drop anything already carried by a rail.
@@ -301,10 +348,9 @@ def _place_flow_notes(diff, onsets, energy_fn, centroid_fn, covered, track, pres
         qbeat = round(beat * subdiv) / subdiv
         if _in_spans(qbeat, covered):
             continue
-        e = max(0.0, min(1.0, energy_fn(t_sec)))
         # Emphasize MAJOR beats: downbeats (bar starts) and backbeats win out
         # over filler so we mark the music's structure, not every transient.
-        score = max(0.0, min(1.0, strength)) * (0.35 + 0.65 * e) * _beat_emphasis(qbeat)
+        score = max(0.0, min(1.0, strength)) * _beat_emphasis(qbeat)
         if qbeat not in slots or score > slots[qbeat][0]:
             slots[qbeat] = (score, track.beats_to_seconds(qbeat))
 
@@ -331,42 +377,49 @@ def _place_flow_notes(diff, onsets, energy_fn, centroid_fn, covered, track, pres
     crossed: dict[int, bool] = {HAND_RIGHT: False, HAND_LEFT: False}
 
     for beat, _score, t_sec in kept:
+        # Rubber-band: section intensity (1..10) scales how far the target zone
+        # spreads from a tight central box (verse) to the full grid (chorus).
+        iv = intensity_at(beat)
+        spread = 0.20 + 0.80 * (iv - 1.0) / 9.0     # 0.2 (tight) .. 1.0 (full)
+        b = max(0.0, min(1.0, centroid_fn(t_sec)))   # brightness -> zone
+        ty_full = NOTE_Y_LOW + b * (NOTE_Y_HIGH - NOTE_Y_LOW)
+        mag_full = NOTE_X_INNER + b * (NOTE_X_OUTER - NOTE_X_INNER)
+        ty = 1.8 + (ty_full - 1.8) * spread          # compress toward chest
+        mag = 0.6 + (mag_full - 0.6) * spread        # compress toward center
+
+        # SNARE SHATTER: strong backbeat -> both hands fling apart, outward.
+        # Reserved for higher-intensity sections so quiet verses stay tight.
+        if beat in shatter_beats and iv > 4.5:
+            placed_any = False
+            for h, hm in ((HAND_LEFT, -1.0), (HAND_RIGHT, 1.0)):
+                tx2 = hm * max(2.0, mag) + hm * 0.4 * spread
+                x2, y2 = _reach_clamp(tx2, ty, pos[h], t_sec, max_hand_speed, hm)
+                diff.notes.append(Note(time=round(beat, 4), x=round(x2, 4),
+                                       y=round(y2, 4), hand_type=h))
+                pos[h] = (x2, y2, t_sec)
+                notes_added += 1
+                placed_any = True
+            if placed_any:
+                prev_hand = HAND_RIGHT  # next single note starts on the left
+                continue
+
         # Strict alternation per *placed* note — no skips that could double a hand.
         hand = HAND_RIGHT if prev_hand == HAND_LEFT else HAND_LEFT
         home = 1.0 if hand == HAND_RIGHT else -1.0
-        p = pos[hand]
-
-        # Frequency -> target zone. Bass (low brightness) sits low and central;
-        # bright leads/vocals pull high and outward.
-        b = max(0.0, min(1.0, centroid_fn(t_sec)))
-        ty = NOTE_Y_LOW + b * (NOTE_Y_HIGH - NOTE_Y_LOW)
-        mag = NOTE_X_INNER + b * (NOTE_X_OUTER - NOTE_X_INNER)
 
         # Side: home, except a deliberate cross-body that resolves next note.
         if crossed[hand]:
             side = home
             crossed[hand] = False
-        elif rng.random() < 0.13:
+        elif rng.random() < 0.13 and iv > 4.0:       # cross-body on busier sections
             side = -home
             crossed[hand] = True
         else:
             side = home
-        tx = side * mag + rng.uniform(-0.35, 0.35)
-        ty += rng.uniform(-0.25, 0.25)
+        tx = side * mag + rng.uniform(-0.35, 0.35) * spread
+        tyj = ty + rng.uniform(-0.25, 0.25) * spread
 
-        if p is not None:
-            # HARD reach boundary: never demand more than the velocity budget
-            # (where the hand physically was, dt ago). This is the no-teleport /
-            # impossible-transition guard, applied before anything is placed.
-            dt = t_sec - p[2]
-            reach = max_hand_speed * dt * 0.95
-            dx, dy = tx - p[0], ty - p[1]
-            dist = math.hypot(dx, dy)
-            if dist > reach and dist > 0:
-                f = reach / dist
-                tx, ty = p[0] + dx * f, p[1] + dy * f
-
-        x, y = _clamp_playable(tx, ty, home)
+        x, y = _reach_clamp(tx, tyj, pos[hand], t_sec, max_hand_speed, home)
         diff.notes.append(Note(time=round(beat, 4), x=round(x, 4),
                                y=round(y, 4), hand_type=hand))
         notes_added += 1
@@ -374,6 +427,19 @@ def _place_flow_notes(diff, onsets, energy_fn, centroid_fn, covered, track, pres
         prev_hand = hand
 
     return notes_added, len(kept)
+
+
+def _reach_clamp(tx, ty, prev, t_sec, max_hand_speed, home):
+    """Pull the target inside the hard reach budget, then the spatial bounds."""
+    if prev is not None:
+        dt = t_sec - prev[2]
+        reach = max_hand_speed * dt * 0.95
+        dx, dy = tx - prev[0], ty - prev[1]
+        dist = math.hypot(dx, dy)
+        if dist > reach and dist > 0:
+            f = reach / dist
+            tx, ty = prev[0] + dx * f, prev[1] + dy * f
+    return _clamp_playable(tx, ty, home)
 
 
 def _clamp_playable(x: float, y: float, home: float) -> tuple[float, float]:
