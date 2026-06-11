@@ -5,3 +5,7 @@ scipy>=1.10.0
 customtkinter>=5.2.0
 # Editor-correct .synth read/write is delegated to synth_mapping_helper.
 synth-mapping-helper>=1.5
+# Dev/eval extras: pytest runs the suite; matplotlib is only needed for
+# `tools/evaluate_map.py --plots` (the evaluator itself runs without it).
+pytest>=7.0
+matplotlib>=3.5

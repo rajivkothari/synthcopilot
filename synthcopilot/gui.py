@@ -69,6 +69,7 @@ class SynthCoPilotApp(ctk.CTk):
 
         self._track_data = None       # neutral model, for display
         self._synth = None            # held SMH SynthFile, the saveable artifact
+        self._verdict = ""            # quality verdict of the held map
         self._source_path = None
         self._generating = False
 
@@ -588,8 +589,15 @@ class SynthCoPilotApp(ctk.CTk):
             self._synth = build_synthfile(track, p["audio"])
             self._track_data = track
             self._source_path = p["audio"]
-            print(f"Generated {summary['notes_added']} notes, "
-                  f"{summary['rails_added']} rails into {p['difficulty']}")
+
+            # Surface the full debug report + verdict in the console — the same
+            # report the CLI prints — so the GUI never silently ships a weak map.
+            from synthcopilot.cli import _print_debug_report
+            _print_debug_report(summary, track, bpm, offset, p["difficulty"])
+            self._verdict = summary.get("report", {}).get("verdict", "")
+            if p["difficulty"] == "Master" and self._verdict not in ("Master", "Master Plus"):
+                print(f"[WARN] verdict is '{self._verdict}', BELOW Master — "
+                      f"saving is allowed but the map did not earn Master.")
             print("Ready — use 'Save / Export Map' to write the .synth.")
             self.after(0, self._refresh_map_info)
             self._set_progress(1.0)
@@ -638,7 +646,8 @@ class SynthCoPilotApp(ctk.CTk):
 
         try:
             out = smh_io.save_synthfile(self._synth, path)
-            self.log(f"Saved: {out}  (real Synth Riders format)")
+            tag = f"  [verdict: {self._verdict}]" if self._verdict else ""
+            self.log(f"Saved: {out}  (real Synth Riders format){tag}")
         except Exception as e:
             self.log(f"[ERROR] Save failed: {e}")
 

@@ -114,9 +114,10 @@ def cmd_new(args):
         print(f"Loaded style profile: {args.profile}")
     elif args.learn_from:
         style = StyleProfile.learn(args.learn_from)
-        print(f"Learned style from {style.source_maps} map(s) under {args.learn_from}")
-        print(f"  density={style.notes_per_beat:.2f} notes/beat, "
-              f"alternation={style.alternation:.2f}, rail_rate={style.rail_rate:.3f}")
+        print(f"Learned profile from {style.source_maps} map(s) under {args.learn_from}: "
+              f"density={style.notes_per_beat:.2f}/beat, rail_rate={style.rail_rate:.3f}")
+        print("  NOTE: only density + rail balance are applied; placement is "
+              "gesture-driven choreography, not learned positions.")
     else:
         style = StyleProfile.default()
         print("Using built-in default style (no --learn-from / --profile given)")
@@ -147,6 +148,8 @@ def cmd_new(args):
         density_scale=args.density, with_rails=not args.no_rails,
         max_hand_speed=args.max_hand_speed, seed=args.seed,
     )
+    if summary.get("style_info"):
+        print(f"  {summary['style_info']}")
     print(f"Generated {summary['notes_added']} notes, {summary['rails_added']} rails "
           f"into {args.difficulty} "
           f"({'audio-gated' if summary['audio_used'] else 'grid-only, no audio analysis'})")
@@ -174,8 +177,45 @@ def cmd_new(args):
         )
     output = args.output or _os.path.splitext(args.audio)[0] + ".synth"
     smh_io.write_synth(track, args.audio, output, mapper=args.author or "SynthCoPilot")
+
+    # H2. The INDEPENDENT arbiter has the final say: re-evaluate the exported
+    # file (it reads only the objects, not the generator's plan). If it rejects
+    # a Master request, remove the file unless --allow-lower.
+    indep = _independent_verdict(output, track.bpm)
+    if indep:
+        print(f"Independent evaluator verdict: {indep}")
+        if args.difficulty == "Master" and indep not in ("Master", "Master Plus") \
+                and not args.allow_lower:
+            _os.remove(output)
+            raise SystemExit(
+                f"Refusing to export: independent evaluator says '{indep}', not "
+                f"Master. Run `python tools/evaluate_map.py --input <file> --plots` "
+                f"to see why, or pass --allow-lower to export anyway."
+            )
     print(f"Saved: {output}  (real Synth Riders format via synth_mapping_helper)")
     print("Import this .synth into the official Synth Riders editor to refine.")
+
+
+def _independent_verdict(path: str, bpm: float) -> str | None:
+    """Run the standalone evaluator as a subprocess and return its verdict
+    (the arbiter). Returns None if the tool isn't present."""
+    import os
+    import subprocess
+
+    tool = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "tools", "evaluate_map.py")
+    if not os.path.exists(tool):
+        return None
+    try:
+        out = subprocess.run([sys.executable, tool, "--input", path,
+                              "--bpm", str(bpm)],
+                             capture_output=True, text=True, timeout=120)
+    except Exception:
+        return None
+    for line in reversed(out.stdout.splitlines()):
+        if line.startswith("VERDICT:"):
+            return line.split(":", 1)[1].strip()
+    return None
 
 
 def _print_debug_report(summary, track, bpm, offset, difficulty):
@@ -183,7 +223,10 @@ def _print_debug_report(summary, track, bpm, offset, difficulty):
     phrases = summary.get("phrases", [])
     report = summary.get("report", {})
     print("\n================ DEBUG REPORT ================")
-    print(f"BPM: {bpm:.1f} (octave-corrected heuristic)  offset: {offset:.3f}s")
+    # Show the ACTUAL exported values (BeatLockCalibration may have nudged them).
+    note = "" if abs(track.bpm - bpm) < 1e-6 and abs(track.offset - offset) < 1e-6 \
+        else f"  (calibrated from {bpm:.1f}/{offset:.3f}s)"
+    print(f"BPM: {track.bpm:.3f}  offset: {track.offset:.3f}s{note}")
     print(f"difficulty: {difficulty}  notes: {summary['notes_added']}  "
           f"rails: {summary['rails_added']}  walls: {summary.get('walls_added', 0)}")
     if report:

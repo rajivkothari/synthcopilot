@@ -100,7 +100,20 @@ def generate_map(
     diff = track_data.difficulties.get(difficulty)
     if diff is None:
         raise ValueError(f"Difficulty '{difficulty}' not found in track")
-    preset = DIFFICULTY_PRESETS.get(difficulty, _DEFAULT_PRESET)
+    preset = dict(DIFFICULTY_PRESETS.get(difficulty, _DEFAULT_PRESET))
+
+    # A *learned* style profile (--learn-from / --profile) modulates DENSITY and
+    # RAIL balance toward the example maps (clamped so it nudges, never breaks
+    # the difficulty). Position/rhythm are gesture-driven, so the profile's
+    # spatial Markov is intentionally not used here.
+    style_info = ""
+    if getattr(style, "source_maps", 0) > 0:
+        df = min(1.5, max(0.7, style.notes_per_beat / 1.0))
+        rf = min(1.6, max(0.5, style.rail_rate / 0.04)) if style.rail_rate else 1.0
+        density_scale *= df
+        preset["rail_coverage"] = min(0.6, preset["rail_coverage"] * rf)
+        style_info = (f"applied learned profile: density x{df:.2f}, "
+                      f"rail x{rf:.2f} (from {style.source_maps} map(s))")
 
     # --- Resolve audio analysis (injectable for tests) ------------------ #
     audio_used = False
@@ -292,6 +305,7 @@ def generate_map(
         "intent": _choreography_intent(phrases),
         "report": report,
         "beat_lock": beat_lock,
+        "style_info": style_info,
     }
 
 

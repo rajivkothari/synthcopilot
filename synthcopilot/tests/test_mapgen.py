@@ -156,6 +156,23 @@ def test_seed_is_deterministic():
     assert na == nb
 
 
+def test_learned_profile_changes_density():
+    """A learned style profile must actually affect output (not be a no-op):
+    a denser learned profile yields more notes than the default."""
+    from synthcopilot.style import StyleProfile
+
+    on = _dense_onsets(60.0, 0.08)
+    dense = StyleProfile.default()
+    dense.notes_per_beat = 1.6
+    dense.source_maps = 3                       # marks it as 'learned'
+    a, b = _track(), _track()
+    generate_map(a, None, StyleProfile.default(), difficulty="Master",
+                 onsets=on, duration_sec=60.0, seed=1)
+    generate_map(b, None, dense, difficulty="Master",
+                 onsets=on, duration_sec=60.0, seed=1)
+    assert len(b.difficulties["Master"].notes) > len(a.difficulties["Master"].notes)
+
+
 def test_master_is_denser_than_easy():
     on = _dense_onsets(40.0, 0.08)
     master, easy = _track(), _track()
@@ -215,8 +232,8 @@ def test_beat_lock_corrects_consistent_bias():
     track = _track(bpm=120.0)
     # Onsets sit 30ms late relative to a perfect 0.5s grid.
     onsets = [(i * 0.5 + 0.030, 1.0) for i in range(120)]
-    summary = generate_map(track, None, StyleProfile.default(), difficulty="Master",
-                           onsets=onsets, duration_sec=60.0, seed=1)
+    generate_map(track, None, StyleProfile.default(), difficulty="Master",
+                 onsets=onsets, duration_sec=60.0, seed=1)
     # audio_used is False for injected onsets, so call the verifier directly.
     from synthcopilot.mapgen import _beat_lock_verify
     bl = _beat_lock_verify(track, track.difficulties["Master"], onsets)

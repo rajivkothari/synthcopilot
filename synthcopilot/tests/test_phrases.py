@@ -1,9 +1,7 @@
 """Tests for the song-structure / phrase-grammar layer."""
 
-from synthcopilot.models import HAND_LEFT, HAND_RIGHT
 from synthcopilot.phrases import (
     PHRASE_GRAMMAR,
-    Phrase,
     build_phrase_map,
     label_sections,
     phrase_at,

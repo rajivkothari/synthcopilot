@@ -1,11 +1,9 @@
 """Tests for the rhythm engine — cooldown, velocity gate, note snapping."""
 
-import math
-
 import pytest
 
 from synthcopilot.rhythm import apply_cooldown, snap_notes_to_rail
-from synthcopilot.models import RailNode, Note
+from synthcopilot.models import RailNode
 
 
 class TestCooldown:
