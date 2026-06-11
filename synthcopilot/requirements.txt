@@ -1,0 +1,7 @@
+numpy>=1.24.0
+librosa>=0.10.0
+soundfile>=0.12.0
+scipy>=1.10.0
+customtkinter>=5.2.0
+# Editor-correct .synth read/write is delegated to synth_mapping_helper.
+synth-mapping-helper>=1.5

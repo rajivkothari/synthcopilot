@@ -1,0 +1,273 @@
+"""Rhythm engine: audio onset detection and note snapping via librosa.
+
+Analyzes a time-slice of the audio file to detect transient spikes
+(drum hits, synth plucks, percussive attacks) and maps them onto
+positions along a generated rail curve.
+
+Physical constraints:
+- Cooldown threshold prevents humanly impossible note clusters (default
+  50ms minimum gap between successive notes on the same hand).
+- Velocity gate rejects notes that would require arm travel faster than
+  a configurable max speed, measured in Synth Riders grid-units/second.
+"""
+
+import math
+
+import numpy as np
+
+from synthcopilot.models import Note, RailNode
+
+try:
+    import librosa
+except ImportError:
+    librosa = None
+
+MIN_NOTE_GAP_SEC = 0.050
+MAX_HAND_SPEED = 6.0
+
+
+def detect_onsets(
+    audio_path: str,
+    start_sec: float,
+    end_sec: float,
+    sensitivity: float = 1.0,
+) -> list[float]:
+    """Detect transient onset timestamps within a time window.
+
+    Args:
+        audio_path: path to the audio file (.ogg, .wav, .mp3).
+        start_sec: start of the analysis window in seconds.
+        end_sec: end of the analysis window in seconds.
+        sensitivity: multiplier on onset detection threshold
+                     (lower = more onsets detected).
+
+    Returns:
+        List of onset timestamps in seconds (absolute, not relative).
+    """
+    if librosa is None:
+        raise ImportError("librosa is required: pip install librosa soundfile")
+
+    y, sr = librosa.load(audio_path, sr=None, offset=start_sec, duration=end_sec - start_sec)
+
+    onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+    onset_frames = librosa.onset.onset_detect(
+        y=y,
+        sr=sr,
+        onset_envelope=onset_env,
+        delta=0.07 / max(sensitivity, 0.1),
+        wait=int(sr * 0.03 / 512),
+    )
+    onset_times = librosa.frames_to_time(onset_frames, sr=sr)
+    absolute_times = onset_times + start_sec
+
+    return [float(t) for t in absolute_times if start_sec <= t <= end_sec]
+
+
+def apply_cooldown(
+    onset_times: list[float], min_gap: float = MIN_NOTE_GAP_SEC
+) -> list[float]:
+    """Remove onsets that fall within the cooldown window of a prior onset."""
+    if not onset_times:
+        return []
+    filtered = [onset_times[0]]
+    for t in onset_times[1:]:
+        if t - filtered[-1] >= min_gap:
+            filtered.append(t)
+    return filtered
+
+
+def snap_notes_to_rail(
+    onset_times_sec: list[float],
+    rail_nodes: list[RailNode],
+    start_sec: float,
+    end_sec: float,
+    bpm: float,
+    offset: float = 0.0,
+    hand_type: int = 0,
+    min_gap: float = MIN_NOTE_GAP_SEC,
+    max_hand_speed: float = MAX_HAND_SPEED,
+) -> list[Note]:
+    """Place notes along a rail curve at detected onset timestamps.
+
+    For each onset, finds the corresponding position on the rail by
+    interpolating between rail nodes based on time, then creates a
+    Note at that (x, y, beat_time).
+
+    Physical constraints are applied in two passes:
+    1. Cooldown: drop onsets closer than min_gap seconds apart.
+    2. Velocity gate: drop notes that would require hand travel
+       faster than max_hand_speed grid-units/second from the
+       previous accepted note.
+
+    Args:
+        onset_times_sec: onset timestamps in seconds.
+        rail_nodes: the generated rail to snap notes onto.
+        start_sec: start time in seconds (matches rail start).
+        end_sec: end time in seconds (matches rail end).
+        bpm: beats per minute for time conversion.
+        offset: audio offset in seconds.
+        hand_type: 0=right, 1=left.
+        min_gap: minimum seconds between notes (cooldown).
+        max_hand_speed: max grid-units/second between consecutive notes.
+
+    Returns:
+        List of Note objects placed along the rail at onset positions.
+    """
+    if not rail_nodes or not onset_times_sec:
+        return []
+
+    duration = end_sec - start_sec
+    if duration <= 0:
+        return []
+
+    onset_times_sec = apply_cooldown(sorted(onset_times_sec), min_gap)
+
+    notes = []
+    prev_pos = None
+    prev_sec = None
+
+    for t_sec in onset_times_sec:
+        progress = (t_sec - start_sec) / duration
+        progress = max(0.0, min(1.0, progress))
+
+        x, y = _interpolate_position(rail_nodes, progress)
+
+        if max_hand_speed > 0 and prev_pos is not None:
+            dt = t_sec - prev_sec
+            if dt > 0:
+                dist = math.hypot(x - prev_pos[0], y - prev_pos[1])
+                if dist / dt > max_hand_speed:
+                    continue
+
+        beat_time = (t_sec - offset) * (bpm / 60.0)
+        notes.append(Note(time=beat_time, x=x, y=y, hand_type=hand_type))
+        prev_pos = (x, y)
+        prev_sec = t_sec
+
+    return notes
+
+
+def _interpolate_position(
+    nodes: list[RailNode], progress: float
+) -> tuple[float, float]:
+    """Find the (x, y) position at a fractional progress along the rail."""
+    if len(nodes) == 1:
+        return nodes[0].x, nodes[0].y
+
+    idx_float = progress * (len(nodes) - 1)
+    idx = int(idx_float)
+    frac = idx_float - idx
+
+    if idx >= len(nodes) - 1:
+        return nodes[-1].x, nodes[-1].y
+
+    a = nodes[idx]
+    b = nodes[idx + 1]
+    x = a.x + (b.x - a.x) * frac
+    y = a.y + (b.y - a.y) * frac
+    return x, y
+
+
+def get_audio_duration(audio_path: str) -> float:
+    """Return the total duration of an audio file in seconds."""
+    if librosa is None:
+        raise ImportError("librosa is required: pip install librosa soundfile")
+    return float(librosa.get_duration(path=audio_path))
+
+
+def analyze_audio(audio_path: str, sensitivity: float = 1.0) -> dict:
+    """Single-pass whole-song analysis, separating *transient* from *continuous*.
+
+    Splits the signal into percussive and harmonic components (HPSS) so the
+    layout script can map them to different geometry, and tracks spectral
+    brightness for frequency->position placement.
+
+    Returns a dict with:
+      * ``duration``        – seconds
+      * ``onsets``          – (time, strength) PERCUSSIVE transients -> Notes
+                              (snare/kick/staccato hits)
+      * ``energy_times`` / ``energies``   – overall RMS (section dynamics)
+      * ``harmonic``        – per-frame harmonic RMS [0,1] -> where sustained
+                              melodic content lives -> Rails
+      * ``centroid``        – per-frame spectral centroid normalized [0,1]
+                              (0 = bass/low, 1 = bright lead/high) -> drives the
+                              Y/X position so bass stays low-center and leads
+                              pull high-and-outward
+      * ``frame_times``     – timestamps shared by energies/harmonic/centroid
+    """
+    if librosa is None:
+        raise ImportError("librosa is required: pip install librosa soundfile")
+
+    y, sr = librosa.load(audio_path, sr=None)
+    duration = len(y) / sr if sr else 0.0
+
+    # Separate transient percussion from sustained harmonic content.
+    y_harm, y_perc = librosa.effects.hpss(y)
+
+    # Notes ride the PERCUSSIVE transients (the groove).
+    penv = librosa.onset.onset_strength(y=y_perc, sr=sr)
+    pframes = librosa.onset.onset_detect(
+        y=y_perc, sr=sr, onset_envelope=penv,
+        delta=0.07 / max(sensitivity, 0.1),
+    )
+    ptimes = librosa.frames_to_time(pframes, sr=sr)
+    ppeak = float(penv.max()) if penv.size else 0.0
+    onsets = [
+        (float(t), float(penv[f] / ppeak) if ppeak > 0 else 0.0)
+        for t, f in zip(ptimes, pframes)
+    ]
+
+    def _norm(arr):
+        ref = float(np.percentile(arr, 95)) if arr.size else 0.0
+        return np.clip(arr / ref, 0.0, 1.0) if ref > 0 else arr
+
+    rms = librosa.feature.rms(y=y)[0]
+    frame_times = librosa.times_like(rms, sr=sr)
+    energies = _norm(rms)
+    harmonic = _norm(librosa.feature.rms(y=y_harm)[0])
+
+    # Spectral content for centroid (brightness) and high-frequency density.
+    S = np.abs(librosa.stft(y))
+    freqs = librosa.fft_frequencies(sr=sr)
+    stimes = librosa.times_like(S, sr=sr)
+    cent = librosa.feature.spectral_centroid(S=S, sr=sr)[0]
+    clo, chi = (float(np.percentile(cent, 10)), float(np.percentile(cent, 90))) \
+        if cent.size else (0.0, 1.0)
+    centroid = np.clip((cent - clo) / max(chi - clo, 1e-6), 0.0, 1.0)
+
+    # High-frequency density (>2 kHz) -> "brightness energy" for intensity.
+    hi_mask = freqs >= 2000.0
+    hi = S[hi_mask].sum(axis=0) if hi_mask.any() else np.zeros(S.shape[1])
+    hi_n = np.interp(frame_times, stimes, _norm(hi))
+    # Intensity vector = loud AND bright (drives the rubber-band expansion).
+    intensity = np.clip(0.6 * energies + 0.4 * hi_n, 0.0, 1.0)
+
+    # Snare/backbeat trigger: isolate ~200-400 Hz for the dual-note "shatters".
+    snares = []
+    try:
+        from scipy.signal import butter, sosfiltfilt
+
+        sos = butter(4, [200.0, 400.0], btype="band", fs=sr, output="sos")
+        y_snare = sosfiltfilt(sos, y).astype(np.float32)
+        senv = librosa.onset.onset_strength(y=y_snare, sr=sr)
+        sfr = librosa.onset.onset_detect(y=y_snare, sr=sr, onset_envelope=senv,
+                                         delta=0.12 / max(sensitivity, 0.1))
+        st = librosa.frames_to_time(sfr, sr=sr)
+        speak = float(senv.max()) if senv.size else 0.0
+        snares = [(float(t), float(senv[f] / speak) if speak > 0 else 0.0)
+                  for t, f in zip(st, sfr)]
+    except Exception:
+        pass  # snare isolation is an enhancement; fall back to no shatters
+
+    return {
+        "duration": duration,
+        "onsets": onsets,
+        "snares": snares,
+        "intensity": intensity,
+        "energy_times": frame_times,
+        "energies": energies,
+        "frame_times": frame_times,
+        "harmonic": harmonic,
+        "centroid": centroid,
+    }
+
