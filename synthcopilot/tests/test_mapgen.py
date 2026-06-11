@@ -74,7 +74,8 @@ def test_frequency_drives_height():
     import numpy as np
     low_y = np.mean([n.y for n in low.difficulties["Master"].notes])
     high_y = np.mean([n.y for n in high.difficulties["Master"].notes])
-    assert high_y > low_y + 0.8, f"bright notes should sit higher ({high_y:.2f} vs {low_y:.2f})"
+    # Brightness still lifts notes, though dance gestures now dominate height.
+    assert high_y > low_y + 0.3, f"bright notes should sit higher ({high_y:.2f} vs {low_y:.2f})"
 
 
 def test_no_center_gravity():

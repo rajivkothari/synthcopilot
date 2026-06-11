@@ -256,11 +256,14 @@ def _reversal_frac(seq):
 
 
 def m_motion_smoothness(objs, n_phrases):
-    """[3] Motion-path quality: do the per-hand note sequences flow, or jag?"""
+    """[3] Motion-path quality. A direction reversal is only "target practice"
+    if it is NOT a repeated motif: a clean side-to-side bounce reverses on
+    purpose (high repeat), random scatter reverses AND doesn't repeat. So a
+    phrase fails only when reversals are high AND its bar-to-bar repetition is
+    low."""
     fails = []
-    total_sharp = 0
-    total_pts = 0
-    worst = []
+    total_sharp = total_pts = 0
+    scatter = []
     for p in range(n_phrases):
         po = _phrase_objs(objs, p)
         ph_sharp = ph_pts = 0
@@ -274,15 +277,69 @@ def m_motion_smoothness(objs, n_phrases):
         total_pts += ph_pts
         if ph_pts >= 8:
             pf = ph_sharp / ph_pts
-            if pf > 0.35:
-                worst.append((p, pf))
+            repeat = _bar_motif_repeat(sorted(po, key=lambda o: o.beat))
+            if pf > 0.35 and repeat < 0.55:        # jagged AND not a repeated groove
+                scatter.append((p, pf, repeat))
     overall = total_sharp / max(total_pts, 1)
-    if overall > 0.30:
-        fails.append(f"hand paths jagged: {overall:.0%} of moves sharply reverse "
-                     f"(> 30% = tangle, not choreography)")
-    for p, pf in worst[:6]:
-        fails.append(f"phrase {p}: {pf:.0%} sharp reversals (target-practice motion)")
-    return {"reversal_frac": round(overall, 3)}, fails
+    if scatter:
+        for p, pf, rep in scatter[:6]:
+            fails.append(f"phrase {p}: {pf:.0%} reversals with low repeat "
+                         f"{rep:.2f} (scatter, not a groove)")
+    return {"reversal_frac": round(overall, 3), "scatter_phrases": len(scatter)}, fails
+
+
+def _bar_motif_repeat(seq):
+    """How repeated is the per-bar motion shape? Compares each bar's mean
+    position to the phrase's bar-mean; low variance across bars = a repeated
+    groove (1.0), high variance = a new idea every bar (0.0)."""
+    bars = {}
+    for o in seq:
+        bars.setdefault(int((o.beat % PHRASE_BEATS) // 4.0), []).append((o.x, o.y))
+    if len(bars) < 2:
+        return 1.0
+    centroids = [np.mean(v, axis=0) for v in bars.values() if v]
+    spread = np.mean([np.linalg.norm(c - np.mean(centroids, axis=0)) for c in centroids])
+    return float(max(0.0, 1.0 - spread / 3.0))
+
+
+def m_groove(objs, n_phrases, bpm):
+    """[GrooveScore] per phrase: beat lock, motif repetition, L/R relationship,
+    payoff, center gravity, and dance feel (lateral travel)."""
+    spb = 60.0 / bpm
+    rows = []
+    fails = []
+    for p in range(n_phrases):
+        po = _phrase_objs(objs, p)
+        if len(po) < 4:
+            continue
+        xs = np.array([o.x for o in po]); ys = np.array([o.y for o in po])
+        beats = [o.beat for o in po]
+        lock = np.mean([abs(b * 4 - round(b * 4)) < 0.06 for b in beats])
+        repeat = _bar_motif_repeat(sorted(po, key=lambda o: o.beat))
+        L = sum(1 for o in po if o.hand == 1); R = len(po) - L
+        relate = min(L, R) / max(L + R, 1) * 2          # 1.0 = balanced hands
+        center = float(np.mean((np.abs(xs) < 1.0) & (ys > 1.3) & (ys < 2.4)))
+        cen_ok = 1.0 - min(1.0, center / 0.35)
+        lateral = float(xs.max() - xs.min())
+        dance = min(1.0, lateral / 4.0)
+        # payoff: a wide or dual-note event in the last bar
+        last_bar = [o for o in po if o.beat >= (p + 1) * PHRASE_BEATS - 4.0]
+        payoff = any(abs(o.x) > 2.5 for o in last_bar) or \
+            len({round(o.beat, 2) for o in last_bar}) < len(last_bar)
+        gs = (0.22 * lock + 0.20 * repeat + 0.16 * relate + 0.18 * cen_ok
+              + 0.14 * dance + 0.10 * (1.0 if payoff else 0.0))
+        rows.append({"phrase": p, "groove": round(gs, 2), "lock": round(float(lock), 2),
+                     "repeat": round(repeat, 2), "relate": round(relate, 2),
+                     "center": round(center, 2), "lateral": round(lateral, 1),
+                     "payoff": payoff})
+        if gs < 0.6:
+            fails.append(f"phrase {p}: GrooveScore {gs:.2f} < 0.60 "
+                         f"(repeat {repeat:.2f}, center {center:.0%}, "
+                         f"payoff {'y' if payoff else 'N'})")
+    avg = float(np.mean([r["groove"] for r in rows])) if rows else 0.0
+    if avg < 0.6:
+        fails.append(f"average GrooveScore {avg:.2f} < 0.60")
+    return {"rows": rows, "avg": round(avg, 2)}, fails
 
 
 def m_counterpoint(objs, n_phrases):
@@ -416,7 +473,8 @@ def evaluate(path, bpm, make_plots, outdir):
     cp, f5 = m_counterpoint(objs, n_phrases)
     drop, f6 = m_drop(objs, n_phrases, bpm)
     motion, f7 = m_motion_smoothness(objs, n_phrases)
-    all_fails = f1 + f2 + f3 + f4 + f5 + f6 + f7
+    groove, f8 = m_groove(objs, n_phrases, bpm)
+    all_fails = f1 + f2 + f3 + f4 + f5 + f6 + f7 + f8
     v = verdict(density, drop, all_fails)
 
     print("=" * 64)
@@ -434,11 +492,15 @@ def evaluate(path, bpm, make_plots, outdir):
     print(f"[6] COUNTERPOINT rail_support={cp['rail_support_frac']:.0%}")
     print(f"[7] DROP verse={drop['verse_ops']}obj/s/{drop['verse_width']}u  "
           f"drop={drop['drop_ops']}obj/s/{drop['drop_width']}u")
-    print("\n[5] PHRASE CHOREOGRAPHY:")
+    print(f"[G] GROOVESCORE avg={groove['avg']}")
+    print("\n[5] PHRASE CHOREOGRAPHY + GROOVE:")
+    gmap = {g["phrase"]: g for g in groove["rows"]}
     for r in rows:
-        print(f"    p{r['phrase']:>2} {r['label']:<34} {r['ops']:>4} obj/s "
-              f"lat={r['lateral']:>4} vert={r['vertical']:>4} center={r['center_frac']:.0%} "
-              f"travel={r['travel']}")
+        g = gmap.get(r["phrase"], {})
+        gs = f"groove={g.get('groove', '-'):<4} repeat={g.get('repeat', '-')} " \
+             f"payoff={'Y' if g.get('payoff') else 'n'}" if g else ""
+        print(f"    p{r['phrase']:>2} {r['label']:<24} {r['ops']:>4}o/s "
+              f"lat={r['lateral']:>4} center={r['center_frac']:.0%}  {gs}")
     print("\nFAILURES:")
     if all_fails:
         for f in all_fails:

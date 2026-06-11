@@ -182,7 +182,7 @@ def generate_map(
     # during sustained melodic moments the same path is *emitted* as a rail,
     # so rails connect into the surrounding notes by construction — and while
     # one hand rides a rail, the other keeps tapping (counterpoint).
-    from synthcopilot.paths import make_path
+    from synthcopilot.dance import dance_position
 
     rails_added = 0
     rail_windows: list[tuple[float, float, int]] = []   # (start, end, hand)
@@ -211,12 +211,15 @@ def generate_map(
             while w + RAIL_SWEEP_BEATS <= min(ph.end_beat, total_beats):
                 we = w + RAIL_SWEEP_BEATS
                 if any(s < we and w < e for s, e, _m in spans):
-                    path = make_path(ph, hand_cycle, spread)
-                    # Anchor to the hand path at both ends (continuity with the
-                    # surrounding notes), but SHAPE the body into an expressive
-                    # curve — arc / wave / S-curve / spiral — so it reads as
-                    # choreography, never a straight connector.
-                    p0, p1 = path(w), path(we)
+                    # A rail is a big HAND GESTURE: start anchored to the groove
+                    # position, sweep across the grid to a wide contrasting
+                    # release (a theatrical arm sweep), shaped into an
+                    # expressive curve — never a straight connector.
+                    g0 = dance_position(ph, hand_cycle, w, spread, 0.5)
+                    sweep = -1.0 if g0[0] > 0 else 1.0
+                    p0 = (g0[0], g0[1])
+                    p1 = (sweep * (2.4 + 1.1 * spread),
+                          (3.4 if g0[1] < 2.0 else 0.6))   # cross + climb/drop
                     shape = _RAIL_SHAPES[(shape_cycle + ph.index) % len(_RAIL_SHAPES)]
                     nodes = _shaped_rail(p0, p1, w, we, shape, spread,
                                          1.0 if hand_cycle == HAND_RIGHT else -1.0)
@@ -383,7 +386,6 @@ def _place_flow_notes(diff, onsets, snares, centroid_fn, intensity_at, phrases,
     # Quantize onsets to the grid, dedupe per slot keeping the strongest. The
     # phrase's MOTIF rhythm signature boosts its slots so the same rhythmic
     # figure recurs every phrase of that label — repetition the player learns.
-    from synthcopilot.paths import make_path
     from synthcopilot.phrases import phrase_at
 
     # RHYTHM SLOT ENGINE: musically meaningful slots, not just onsets. Every
@@ -435,17 +437,12 @@ def _place_flow_notes(diff, onsets, snares, centroid_fn, intensity_at, phrases,
         kept.extend(sorted(top, key=lambda c: c[0]))
     kept.sort(key=lambda c: c[0])
 
-    # --- Notes ride the choreography paths ------------------------------- #
+    # --- DanceChoreographyPass: notes sit on the phrase's repeated groove --- #
+    from synthcopilot.dance import dance_position
+
     notes_added = 0
     prev_hand = HAND_LEFT
     pos: dict[int, tuple[float, float, float] | None] = {HAND_RIGHT: None, HAND_LEFT: None}
-    path_cache: dict[tuple[int, int], object] = {}
-
-    def hand_path(ph, hand, spread):
-        key = (ph.index, hand)
-        if key not in path_cache:
-            path_cache[key] = make_path(ph, hand, spread)
-        return path_cache[key]
 
     for beat, _score, t_sec in kept:
         ph = phrase_at(phrases, beat)
@@ -455,16 +452,14 @@ def _place_flow_notes(diff, onsets, snares, centroid_fn, intensity_at, phrases,
 
         railing = _railing_hand(beat, rail_windows)
 
-        # SNARE SHATTER: both hands accent together at their paths' positions,
-        # pushed outward — a readable two-handed impact. Builds/choruses only,
-        # and never while a hand is committed to a rail.
+        # SNARE SHATTER = phrase payoff: both hands fling wide together (the
+        # mirrored drop hit). Builds/choruses only, never over a rail.
         if beat in shatter_beats and ph.shatters and railing is None:
             for h in (HAND_LEFT, HAND_RIGHT):
-                px, py = hand_path(ph, h, spread)(beat)
-                px += math.copysign(0.8 + 0.4 * spread, px)   # fling outward
-                py += (b - 0.5) * 1.2
-                x2, y2 = _reach_clamp(px, py, pos[h], t_sec, max_hand_speed,
-                                      math.copysign(1.0, px))
+                gx, gy, _role = dance_position(ph, h, beat, spread, b)
+                gx += math.copysign(0.8 + 0.5 * spread, gx or (1.0 if h == HAND_RIGHT else -1.0))
+                x2, y2 = _reach_clamp(gx, gy, pos[h], t_sec, max_hand_speed,
+                                      math.copysign(1.0, gx))
                 diff.notes.append(Note(time=round(beat, 4), x=round(x2, 4),
                                        y=round(y2, 4), hand_type=h))
                 pos[h] = (x2, y2, t_sec)
@@ -478,13 +473,17 @@ def _place_flow_notes(diff, onsets, snares, centroid_fn, intensity_at, phrases,
         else:
             hand = HAND_RIGHT if prev_hand == HAND_LEFT else HAND_LEFT
 
-        px, py = hand_path(ph, hand, spread)(beat)
-        py += (b - 0.5) * 1.2                          # brightness lifts/lowers
-        px += rng.uniform(-0.12, 0.12)
-        py += rng.uniform(-0.12, 0.12)
+        # DANCE PASS: position = the phrase's repeated groove gesture, accented
+        # by beat strength. Center-gravity limiter: a weak beat that lands in
+        # the center box is nudged outward unless it's a deliberate downbeat.
+        gx, gy, role = dance_position(ph, hand, beat, spread, b)
+        if abs(gx) < 1.0 and 1.3 < gy < 2.4 and not role.startswith("strong"):
+            gx += math.copysign(1.4, gx or (1.0 if hand == HAND_RIGHT else -1.0))
+        gx += rng.uniform(-0.1, 0.1)
+        gy += rng.uniform(-0.1, 0.1)
 
-        x, y = _reach_clamp(px, py, pos[hand], t_sec, max_hand_speed,
-                            math.copysign(1.0, px) if px else 1.0)
+        x, y = _reach_clamp(gx, gy, pos[hand], t_sec, max_hand_speed,
+                            math.copysign(1.0, gx) if gx else 1.0)
         diff.notes.append(Note(time=round(beat, 4), x=round(x, 4),
                                y=round(y, 4), hand_type=hand))
         notes_added += 1
