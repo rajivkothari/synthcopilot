@@ -202,15 +202,19 @@ def generate_map(
             if not ph.rails:
                 continue
             spread = min(0.30 + 0.70 * (ph.intensity - 1.0) / 9.0 + ph.spread_boost, 1.0)
-            # Rail windows CENTERED on the path's center-crossings (t = 8, 16,
-            # 24 of the 16-beat sweep), so each rail is the path's widest,
-            # fastest pendulum swing — a 4-beat SWEEP (not a loop), emitted
-            # only where the music sustains.
-            w = ph.start_beat + 6.0
+            # INTRO RAIL MODE ("long"): low-energy phrases are rail-FIRST —
+            # slow expressive 2-bar rails nearly back-to-back, with the other
+            # hand limited to sparse accents (via counterpoint). High-energy
+            # phrases ("sweep") keep 1-bar pendulum sweeps gated to sustained
+            # harmonic music.
+            long_mode = ph.rail_mode == "long"
+            rail_len = 8.0 if long_mode else RAIL_SWEEP_BEATS
+            gap = 2.0 if long_mode else 4.0
+            w = ph.start_beat + (1.0 if long_mode else 6.0)
             shape_cycle = 0
-            while w + RAIL_SWEEP_BEATS <= min(ph.end_beat, total_beats):
-                we = w + RAIL_SWEEP_BEATS
-                if any(s < we and w < e for s, e, _m in spans):
+            while w + rail_len <= min(ph.end_beat, total_beats):
+                we = w + rail_len
+                if long_mode or any(s < we and w < e for s, e, _m in spans):
                     # A rail is a big HAND GESTURE: start anchored to the groove
                     # position, sweep across the grid to a wide contrasting
                     # release (a theatrical arm sweep), shaped into an
@@ -228,20 +232,15 @@ def generate_map(
                     rail_windows.append((w, we, hand_cycle))
                     hand_cycle = HAND_LEFT if hand_cycle == HAND_RIGHT else HAND_RIGHT
                     shape_cycle += 1
-                w += 8.0
+                w += rail_len + gap
 
-    # --- E. Notes ride percussive transients ALONG the hand paths -------- #
-    notes_added, onsets_kept = _place_flow_notes(
-        diff, onsets, snares, centroid_fn, intensity_at, phrases, rail_windows,
-        track_data, preset, density_scale, max_speed_grid, total_beats, rng,
-    )
-
-    # --- Walls: body choreography at phrase transitions ------------------ #
-    # A wall is a body instruction, not a hazard: a side gate on the beat
-    # before each chorus forces the torso lean INTO the drop (alternating
-    # sides), and the final chorus entry gets a crouch. Notes within half a
-    # beat are cleared so the wall is always fair and readable.
+    # --- Walls FIRST: body choreography at phrase transitions ------------- #
+    # A wall is a body instruction, not a hazard: a side gate before each
+    # chorus forces a torso lean INTO the drop (alternating sides); the final
+    # chorus entry gets a crouch. Walls are decided BEFORE notes so placement
+    # can respect the player's post-wall recovery posture.
     walls_added = 0
+    recoveries: list[tuple[float, float, float, str]] = []  # (beat, exit_x, exit_y, kind)
     if with_rails:  # walls accompany the full choreography pipeline
         from synthcopilot.models import Wall
 
@@ -260,8 +259,17 @@ def generate_map(
                 lean = -lean
             diff.walls.append(Wall(time=round(wbeat, 4), x=wx, y=wy, wall_type=wtype))
             walls_added += 1
-            # Fairness: clear notes near the wall so the body move is clean.
-            diff.notes = [n for n in diff.notes if abs(n.time - wbeat) > 0.5]
+            recoveries.append((wbeat, *WALL_EXIT_POSTURE[wtype]))
+
+    # --- E. Notes ride percussive transients ALONG the hand paths -------- #
+    notes_added, onsets_kept = _place_flow_notes(
+        diff, onsets, snares, centroid_fn, intensity_at, phrases, rail_windows,
+        recoveries, track_data, preset, density_scale, max_speed_grid,
+        total_beats, rng,
+    )
+
+    # --- BeatLockVerifier: measure + correct grid alignment --------------- #
+    beat_lock = _beat_lock_verify(track_data, diff, onsets) if audio_used else None
 
     # --- F+G. Validate hand flow / rails, repair, re-score --------------- #
     from synthcopilot.quality import validate_and_repair
@@ -280,6 +288,85 @@ def generate_map(
         "phrases": phrases,
         "intent": _choreography_intent(phrases),
         "report": report,
+        "beat_lock": beat_lock,
+    }
+
+
+# Wall type -> the player's likely exit posture (x, y, movement kind). The
+# angle semantics are our best mapping of SMH wall names to body movement;
+# treat as conservative until VR-verified.
+WALL_EXIT_POSTURE = {
+    "angle_right": (-1.2, 1.6, "lean left"),
+    "angle_left": (1.2, 1.6, "lean right"),
+    "wall_right": (-1.5, 1.6, "dodge left"),
+    "wall_left": (1.5, 1.6, "dodge right"),
+    "crouch": (0.0, 0.8, "duck"),
+    "center": (0.0, 1.6, "center gate"),
+}
+
+RECOVERY_BEATS = 2.0
+
+
+def _beat_lock_verify(track, diff, onsets) -> dict | None:
+    """BeatLockVerifier: measure strong-beat objects against the audio's
+    percussive onsets; if the whole map is consistently early/late, apply a
+    global offset correction so the grid sits ON the music.
+
+    Objects stay quantized to musical subdivisions (we never snap to raw
+    onsets); only the global offset moves.
+    """
+    if not onsets:
+        return None
+    onset_secs = np.array(sorted(t for t, _ in onsets))
+    if onset_secs.size < 8:
+        return None
+
+    def errors():
+        errs = []
+        for n in diff.notes:
+            if abs(n.time - round(n.time)) > 0.02:   # strong (on-beat) objects only
+                continue
+            ns = track.beats_to_seconds(n.time)
+            i = int(np.searchsorted(onset_secs, ns))
+            best = None
+            for j in (i - 1, i):
+                if 0 <= j < onset_secs.size:
+                    d = ns - float(onset_secs[j])
+                    if best is None or abs(d) < abs(best):
+                        best = d
+            if best is not None and abs(best) <= 0.09:
+                errs.append((n.time, best))
+            # unmatched strong notes are fine: not every beat has percussion
+        return errs
+
+    errs = errors()
+    corrected_ms = 0.0
+    if len(errs) >= 12:
+        bias = float(np.median([e for _, e in errs]))
+        # Consistent early/late bias -> shift the global offset (clamped >= 0).
+        if abs(bias) > 0.012 and track.offset - bias >= 0:
+            track.offset = track.offset - bias
+            corrected_ms = -bias * 1000.0
+            errs = errors()
+
+    if not errs:
+        return {"matches": 0, "note": "no percussive matches; grid kept as detected"}
+    e_ms = np.array([e for _, e in errs]) * 1000.0
+    by_phrase: dict[int, list[float]] = {}
+    for beat, e in errs:
+        by_phrase.setdefault(int(beat // 32.0), []).append(e * 1000.0)
+    worst = max(by_phrase.items(), key=lambda kv: abs(float(np.median(kv[1]))))
+    return {
+        "matches": len(errs),
+        "avg_ms": round(float(np.mean(np.abs(e_ms))), 1),
+        "median_ms": round(float(np.median(e_ms)), 1),
+        "bias": "late" if float(np.median(e_ms)) > 5 else
+                "early" if float(np.median(e_ms)) < -5 else "locked",
+        "pct_20ms": round(float(np.mean(np.abs(e_ms) <= 20)), 2),
+        "pct_35ms": round(float(np.mean(np.abs(e_ms) <= 35)), 2),
+        "pct_50ms": round(float(np.mean(np.abs(e_ms) <= 50)), 2),
+        "worst_section": f"phrase {worst[0]} ({float(np.median(worst[1])):+.0f}ms)",
+        "corrected_offset_ms": round(corrected_ms, 1),
     }
 
 
@@ -366,8 +453,8 @@ def _section_intensities(intensity_fn, track, total_beats, chunk_beats=32.0):
 
 
 def _place_flow_notes(diff, onsets, snares, centroid_fn, intensity_at, phrases,
-                      rail_windows, track, preset, density_scale, max_hand_speed,
-                      total_beats, rng):
+                      rail_windows, recoveries, track, preset, density_scale,
+                      max_hand_speed, total_beats, rng):
     """Place notes ON the hand's choreography path at the phrase's rhythm.
 
     Each hand follows a continuous path (paths.py); notes are waypoints along
@@ -450,11 +537,20 @@ def _place_flow_notes(diff, onsets, snares, centroid_fn, intensity_at, phrases,
         spread = min(0.30 + 0.70 * (iv - 1.0) / 9.0 + ph.spread_boost, 1.0)
         b = max(0.0, min(1.0, centroid_fn(t_sec)))    # brightness
 
+        # PostWallRecoveryModel: no objects ON or just before the wall, and
+        # during the recovery window targets stay near the body's exit posture.
+        if any(abs(beat - r[0]) < 0.5 for r in recoveries):
+            continue  # the wall itself owns this moment
+        recovery = _recovery_at(beat, recoveries)
+
         railing = _railing_hand(beat, rail_windows)
 
         # SNARE SHATTER = phrase payoff: both hands fling wide together (the
-        # mirrored drop hit). Builds/choruses only, never over a rail.
-        if beat in shatter_beats and ph.shatters and railing is None:
+        # mirrored drop hit). Builds/choruses only, never over a rail and
+        # never during wall recovery (a double-wide reach would contradict
+        # the body's posture).
+        if beat in shatter_beats and ph.shatters and railing is None \
+                and recovery is None:
             for h in (HAND_LEFT, HAND_RIGHT):
                 gx, gy, _role = dance_position(ph, h, beat, spread, b)
                 gx += math.copysign(0.8 + 0.5 * spread, gx or (1.0 if h == HAND_RIGHT else -1.0))
@@ -477,10 +573,31 @@ def _place_flow_notes(diff, onsets, snares, centroid_fn, intensity_at, phrases,
         # by beat strength. Center-gravity limiter: a weak beat that lands in
         # the center box is nudged outward unless it's a deliberate downbeat.
         gx, gy, role = dance_position(ph, hand, beat, spread, b)
-        if abs(gx) < 1.0 and 1.3 < gy < 2.4 and not role.startswith("strong"):
+        if ph.rail_mode == "long":
+            # Rail-first phrases (intro/breakdown/outro): the free hand plays
+            # CALM, repeated downbeat anchors — a steady home-side accent —
+            # while the rail carries the expression. No busy tap patterns.
+            side = -1.0 if hand == HAND_LEFT else 1.0
+            gx = side * (1.6 + 0.5 * spread)
+            gy = 1.1 + 0.9 * b
+        elif abs(gx) < 1.0 and 1.3 < gy < 2.4 and not role.startswith("strong"):
             gx += math.copysign(1.4, gx or (1.0 if hand == HAND_RIGHT else -1.0))
         gx += rng.uniform(-0.1, 0.1)
         gy += rng.uniform(-0.1, 0.1)
+
+        # Recovery window: pull the target toward the wall-exit posture, with
+        # the allowed radius growing as the body recovers; after a duck, no
+        # immediate high reaches.
+        if recovery is not None:
+            since, ex, ey, kind = recovery
+            radius = 1.2 + 2.4 * (since / RECOVERY_BEATS)
+            ddx, ddy = gx - ex, gy - ey
+            d = math.hypot(ddx, ddy)
+            if d > radius:
+                gx = ex + ddx / d * radius
+                gy = ey + ddy / d * radius
+            if kind == "duck" and since < 1.0:
+                gy = min(gy, 2.0)
 
         x, y = _reach_clamp(gx, gy, pos[hand], t_sec, max_hand_speed,
                             math.copysign(1.0, gx) if gx else 1.0)
@@ -544,6 +661,16 @@ def _shaped_rail(p0, p1, b0, b1, shape, spread, home) -> list:
         nodes.append(RailNode(time=round(b0 + (b1 - b0) * t, 4),
                               x=round(x, 4), y=round(y, 4)))
     return nodes
+
+
+def _recovery_at(beat: float, recoveries) -> tuple[float, float, float, str] | None:
+    """If ``beat`` is inside a post-wall recovery window, return
+    (beats_since_wall, exit_x, exit_y, movement_kind)."""
+    for wbeat, ex, ey, kind in recoveries:
+        since = beat - wbeat
+        if 0.0 <= since <= RECOVERY_BEATS:
+            return (since, ex, ey, kind)
+    return None
 
 
 def _railing_hand(beat: float, rail_windows) -> int | None:

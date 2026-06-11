@@ -129,8 +129,8 @@ def test_macro_rails_span_wide():
     assert rails, "expected rails"
     spans = [max(n.x for n in r.nodes) - min(n.x for n in r.nodes) for r in rails]
     assert np.mean(spans) >= 4.0, f"rails too narrow (mean span {np.mean(spans):.1f})"
-    # Rails are linear pendulum SWEEPS (<= 4 beats) — never longer loops.
-    assert all(r.nodes[-1].time - r.nodes[0].time <= 4.01 for r in rails)
+    # Sweep rails stay <= 4 beats; Intro Rail Mode allows 2-bar (8-beat) rails.
+    assert all(r.nodes[-1].time - r.nodes[0].time <= 8.01 for r in rails)
 
 
 def test_notes_avoid_head_zone():
@@ -176,11 +176,19 @@ def test_rails_appear_in_high_energy_sections():
                            onsets=_dense_onsets(60.0), energy_fn=energy,
                            intensity_fn=energy, duration_sec=60.0, seed=7)
     assert summary["rails_added"] > 0
-    assert len(track.difficulties["Master"].rails) == summary["rails_added"]
-    # Rails should sit in the high-energy (chorus) phrase window.
-    for r in track.difficulties["Master"].rails:
-        start = r.nodes[0].time
-        assert 30 <= start <= 66
+    rails = track.difficulties["Master"].rails
+    assert len(rails) == summary["rails_added"]
+    # The chorus phrase carries sweep rails...
+    assert any(32 <= r.nodes[0].time <= 64 for r in rails)
+    # ...and the low-energy intro is rail-FIRST: long expressive rails
+    # (Intro Rail Mode), not busy note streams.
+    intro_rails = [r for r in rails if r.nodes[0].time < 32]
+    assert intro_rails, "intro should carry long rails"
+    assert all(r.nodes[-1].time - r.nodes[0].time >= 6.0 for r in intro_rails)
+    intro_notes = [n for n in track.difficulties["Master"].notes if n.time < 32]
+    chorus_notes = [n for n in track.difficulties["Master"].notes if 32 <= n.time < 64]
+    assert len(intro_notes) < len(chorus_notes) * 0.6, \
+        "intro must be sparser than the chorus"
 
 
 def test_no_rails_flag():
@@ -200,6 +208,59 @@ def test_flat_energy_no_audio_stays_note_based():
                            onsets=_dense_onsets(20.0), duration_sec=20.0, seed=1)
     assert summary["rails_added"] == 0
     assert summary["notes_added"] > 0
+
+
+def test_beat_lock_corrects_consistent_bias():
+    """Onsets consistently 30ms after the grid -> global offset correction."""
+    track = _track(bpm=120.0)
+    # Onsets sit 30ms late relative to a perfect 0.5s grid.
+    onsets = [(i * 0.5 + 0.030, 1.0) for i in range(120)]
+    summary = generate_map(track, None, StyleProfile.default(), difficulty="Master",
+                           onsets=onsets, duration_sec=60.0, seed=1)
+    # audio_used is False for injected onsets, so call the verifier directly.
+    from synthcopilot.mapgen import _beat_lock_verify
+    bl = _beat_lock_verify(track, track.difficulties["Master"], onsets)
+    assert bl and bl["matches"] >= 12
+    assert abs(bl["corrected_offset_ms"] - 30.0) < 8.0
+    assert abs(bl["median_ms"]) <= 12.0          # locked after correction
+    assert bl["pct_50ms"] >= 0.9
+
+
+def test_post_wall_recovery_respected():
+    """After a wall, notes start near the exit posture; no high reach after
+    a crouch; nothing lands on the wall itself."""
+    from synthcopilot.mapgen import RECOVERY_BEATS, WALL_EXIT_POSTURE
+
+    track = _track()
+    generate_map(track, None, StyleProfile.default(), difficulty="Master",
+                 onsets=_dense_onsets(160.0, 0.1), duration_sec=160.0,
+                 intensity_fn=_verse_chorus_intensity, seed=0)
+    d = track.difficulties["Master"]
+    assert d.walls, "expected walls at chorus transitions"
+    for w in d.walls:
+        ex, ey, kind = WALL_EXIT_POSTURE[w.wall_type]
+        after = sorted((n for n in d.notes if 0 <= n.time - w.time <= RECOVERY_BEATS),
+                       key=lambda n: n.time)
+        assert all(n.time - w.time >= 0.5 for n in after), "object on the wall"
+        if after:
+            first = after[0]
+            assert math.hypot(first.x - ex, first.y - ey) <= 2.6, \
+                f"first post-wall object too far from {kind} exit"
+        if kind == "duck":
+            assert all(n.y <= 2.65 for n in after if n.time - w.time < 1.0), \
+                "high target right after a duck"
+
+
+def test_dance_bar_variation_lifts():
+    """A/A/A'/B: the variation bars sit visibly higher than the intro bars."""
+    from synthcopilot.dance import dance_position
+    from synthcopilot.phrases import build_phrase_map
+
+    ph = build_phrase_map([5.0, 5.0], seed=0)[0]   # a verse phrase
+    # Same within-bar position, strong beat: bar 0 (A) vs bar 5 (A' region).
+    _, y_a, _ = dance_position(ph, 0, ph.start_beat + 0.0, 0.6, 0.5)
+    _, y_v, _ = dance_position(ph, 0, ph.start_beat + 20.0, 0.6, 0.5)
+    assert y_v > y_a + 0.4
 
 
 def test_unknown_difficulty_raises():

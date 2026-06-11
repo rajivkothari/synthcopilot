@@ -41,32 +41,40 @@ STANCES = {
 #   ramp:     density ramps up across the phrase (builds)
 #   fill:     phrase-end burst fill into the next phrase
 #   wall:     body-choreography wall at the phrase transition
+#   rail_mode: "long" = rail-first phrases (2-bar expressive rails, sparse
+#              accents — intros/breakdowns/outros); "sweep" = 1-bar sweeps
 #   body / relationship: the physical idea, for the plan and debug report
 PHRASE_GRAMMAR = {
-    "intro":     dict(density=0.60, subdiv=2, rails=False, shatters=False, ramp=False,
-                      fill=False, wall=False, stances=["open_groove"],
-                      body="center bounce, establish groove",
-                      relationship="alternating"),
+    "intro":     dict(density=0.40, subdiv=2, rails=True,  shatters=False, ramp=False,
+                      fill=False, wall=False, rail_mode="long",
+                      stances=["open_groove"],
+                      body="slow sweeping rails, sparse downbeat accents",
+                      relationship="one-hand rail + sparse other-hand accents"),
     "verse":     dict(density=1.00, subdiv=2, rails=False, shatters=False, ramp=False,
-                      fill=False, wall=False, stances=["open_groove", "open_inverted"],
+                      fill=False, wall=False, rail_mode="sweep",
+                      stances=["open_groove", "open_inverted"],
                       body="side-to-side sweep, low groove",
                       relationship="alternating (call-and-response phase)"),
     "build":     dict(density=1.20, subdiv=4, rails=True,  shatters=True,  ramp=True,
-                      fill=True,  wall=False, stances=["open_inverted", "crossed_super"],
+                      fill=True,  wall=False, rail_mode="sweep",
+                      stances=["open_inverted", "crossed_super"],
                       body="vertical lift, widening",
                       relationship="alternating -> mirrored at peak"),
     "chorus":    dict(density=1.40, subdiv=4, rails=True,  shatters=True,  ramp=False,
-                      fill=True,  wall=True,  stances=["crossed_super", "crossed_floor", "open_groove"],
+                      fill=True,  wall=True,  rail_mode="sweep",
+                      stances=["crossed_super", "crossed_floor", "open_groove"],
                       body="wide dance arc, torso lean into entry",
                       relationship="counter-sweep + rail-with-tap counterpoint"),
     "breakdown": dict(density=0.55, subdiv=2, rails=True,  shatters=False, ramp=False,
-                      fill=False, wall=False, stances=["open_groove"],
-                      body="reset / breath, expressive arms",
+                      fill=False, wall=False, rail_mode="long",
+                      stances=["open_groove"],
+                      body="reset / breath, expressive long rails",
                       relationship="one-hand rail, other rests"),
-    "outro":     dict(density=0.50, subdiv=2, rails=True,  shatters=False, ramp=False,
-                      fill=False, wall=False, stances=["open_groove"],
-                      body="wind-down groove",
-                      relationship="alternating"),
+    "outro":     dict(density=0.45, subdiv=2, rails=True,  shatters=False, ramp=False,
+                      fill=False, wall=False, rail_mode="long",
+                      stances=["open_groove"],
+                      body="wind-down rails",
+                      relationship="one-hand rail + sparse accents"),
 }
 
 # Rhythm signatures (motif beats within a 4-beat bar) per label. The selector
@@ -99,6 +107,7 @@ class Phrase:
     ramp: bool = False
     fill: bool = False
     wall: bool = False
+    rail_mode: str = "sweep"
     body: str = ""
     relationship: str = ""
     spread_boost: float = 0.0        # motif evolution: later choruses go wider
@@ -185,6 +194,7 @@ def build_phrase_map(section_iv: list[float], seed: int = 0) -> list[Phrase]:
             ramp=g["ramp"],
             fill=g["fill"],
             wall=g["wall"],
+            rail_mode=g["rail_mode"],
             body=g["body"],
             relationship=g["relationship"],
             spread_boost=min(0.25, 0.08 * occ) if label == "chorus" else 0.0,

@@ -38,14 +38,30 @@ def groove_for(phrase) -> str:
 
 
 def _bar_structure(bar_idx: int, n_bars: int):
-    """A/A/A'/B motif envelope: width grows toward the phrase end; the final
-    bar is the payoff. Returns (width_mult, is_payoff)."""
+    """A / A / A' / B motif envelope: introduce, repeat, VARY, pay off.
+    Returns (width_mult, is_variation, is_payoff). For 8-bar phrases the
+    variation covers the 'widen/intensify' bars (5-6)."""
     if n_bars <= 1:
-        return 1.0, True
+        return 1.0, False, True
     pos = bar_idx / (n_bars - 1)
     width = 0.82 + 0.45 * pos            # introduce -> widen
     payoff = bar_idx >= n_bars - 1
-    return width, payoff
+    variation = (not payoff) and 0.5 <= pos < 0.9   # the A' bars
+    return width, variation, payoff
+
+
+PAYOFF_BY_LABEL = {
+    "intro": "rail release into verse",
+    "verse": "wide accent",
+    "build": "1/16 fill into drop",
+    "chorus": "mirrored shatter / wide release",
+    "breakdown": "breath -> rail release",
+    "outro": "fade reset",
+}
+
+
+def payoff_for(phrase) -> str:
+    return PAYOFF_BY_LABEL.get(phrase.label, "wide accent")
 
 
 def beat_role(beat: float, phase: float, phrase) -> str:
@@ -146,9 +162,11 @@ def dance_position(phrase, hand, beat, spread, brightness):
     n_bars = max(1, int(round((phrase.end_beat - phrase.start_beat) / BAR)))
     bar_idx = min(int(t // BAR), n_bars - 1)
     phase = (t % BAR) / BAR
-    width, _payoff = _bar_structure(bar_idx, n_bars)
+    width, variation, _payoff = _bar_structure(bar_idx, n_bars)
     role = beat_role(beat, phase, phrase)
     amp = max(0.0, min(1.2, spread * width * _accent(role)))
     side = -1.0 if hand == HAND_LEFT else 1.0
     x, y = _GESTURES[groove](phase, side, amp, brightness, bar_idx, n_bars)
+    if variation:
+        y += 0.7    # A': the same figure, lifted — recognizably varied
     return x, y, role

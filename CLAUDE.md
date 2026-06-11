@@ -160,7 +160,13 @@ asked. End commit bodies with the session link the harness expects.
 
 ## Current state & next steps
 See `docs/METHODOLOGY.md` §"Status" — the Fuego sample scores `VERDICT: Master`
-(avg 3.97 obj/s, center 9%, GrooveScore 0.9, rails 0% straight). Open work:
-richer wall vocabulary, true vocal-stem rails (needs Demucs), more groove
-families, and the standing caveat that **no generated map has been play-tested
-in VR** — the evaluator is a proxy for fun, not proof of it.
+from BOTH the generator gate and the independent evaluator (avg 3.96 obj/s,
+center 6%, GrooveScore 0.89, rails 0% straight). Latest additions:
+**BeatLockVerifier** (strong-beat ms error vs percussive onsets + global offset
+correction; export gate), **Intro Rail Mode** (`rail_mode="long"` phrases are
+rail-first with calm downbeat anchors), **PostWallRecoveryModel** (walls placed
+before notes; recovery windows constrain post-wall targets; `wall_recovery`
+score), and A/A/A'/B bar variation in the dance pass. Open work: richer wall
+vocabulary, true vocal-stem rails (needs Demucs), more groove families, and the
+standing caveat that **no generated map has been play-tested in VR** — the
+evaluator is a proxy for fun, not proof of it.

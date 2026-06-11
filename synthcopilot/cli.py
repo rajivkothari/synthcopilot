@@ -153,13 +153,18 @@ def cmd_new(args):
 
     _print_debug_report(summary, track, bpm, offset, args.difficulty)
 
-    # H. Export gate: a Master request must EARN the Master verdict.
+    # H. Export gate: a Master request must EARN the Master verdict AND a
+    # tight beat lock (when enough percussive matches exist to judge).
     verdict = summary.get("report", {}).get("verdict", "")
-    if args.difficulty == "Master" and verdict not in ("Master", "Master Plus") \
-            and not args.allow_lower:
+    bl = summary.get("beat_lock") or {}
+    beat_locked = not (bl.get("matches", 0) >= 20 and bl.get("pct_50ms", 1.0) < 0.5)
+    if args.difficulty == "Master" and not args.allow_lower \
+            and (verdict not in ("Master", "Master Plus") or not beat_locked):
+        why = f"verdict is '{verdict}'" if verdict not in ("Master", "Master Plus") \
+            else f"beat lock too loose ({bl.get('pct_50ms', 0):.0%} within 50ms)"
         raise SystemExit(
-            f"Refusing to export: verdict is '{verdict}', not Master. "
-            f"Raise --density, check the BPM, or pass --allow-lower to export anyway."
+            f"Refusing to export: {why}. Check the BPM/offset, raise --density, "
+            f"or pass --allow-lower to export anyway."
         )
 
     if not smh_io.HAS_SMH:
@@ -185,14 +190,32 @@ def _print_debug_report(summary, track, bpm, offset, difficulty):
         print(f"pace: avg {report['avg_objects_per_sec']} obj/s, "
               f"peak {report['peak_objects_per_sec']} obj/s; "
               f"worst hand speed {report['worst_hand_speed_ms']} m/s")
+
+    bl = summary.get("beat_lock")
+    if bl:
+        print("\n--- BEAT LOCK ---")
+        if bl.get("matches", 0) == 0:
+            print(f"  {bl.get('note', 'no data')}")
+        else:
+            print(f"  matched strong objects: {bl['matches']}  "
+                  f"avg |err|: {bl['avg_ms']}ms  median: {bl['median_ms']}ms "
+                  f"({bl['bias']})")
+            print(f"  within ±20ms: {bl['pct_20ms']:.0%}  ±35ms: {bl['pct_35ms']:.0%}  "
+                  f"±50ms: {bl['pct_50ms']:.0%}")
+            print(f"  worst section: {bl['worst_section']}  "
+                  f"offset correction applied: {bl['corrected_offset_ms']}ms")
+
     if phrases:
+        from synthcopilot.dance import groove_for, payoff_for
+
         print("\n--- CHOREOGRAPHY PLAN (per 8-bar phrase) ---")
         for ph in phrases:
             t0 = track.beats_to_seconds(ph.start_beat)
             print(f"  [{t0:6.1f}s | bars {ph.index*8+1:>3}-{ph.index*8+8:<3}] "
-                  f"{ph.label:<10} IV={ph.intensity:>4.1f}  motif={ph.stance_name:<14} "
-                  f"occ {ph.occurrence + 1}")
-            print(f"           body: {ph.body};  hands: {ph.relationship}")
+                  f"{ph.label:<10} IV={ph.intensity:>4.1f}  groove={groove_for(ph):<15} "
+                  f"motif={ph.stance_name} occ {ph.occurrence + 1}")
+            print(f"           body: {ph.body};  hands: {ph.relationship};  "
+                  f"payoff: {payoff_for(ph)}")
     if report:
         print("\n--- QUALITY SCORES (threshold-gated) ---")
         for k, v in report["scores"].items():

@@ -267,6 +267,39 @@ def _counterpoint(rails, notes):
     return supported / len(rails)
 
 
+def _wall_recovery(walls, notes, track, max_speed_ms):
+    """PostWallRecoveryModel validation: the first objects after a wall must
+    respect the body's exit posture — no instant far-opposite reaches, no
+    high targets right after a duck, at least a beat to recover."""
+    from synthcopilot.mapgen import RECOVERY_BEATS, WALL_EXIT_POSTURE
+
+    warnings = []
+    bad = 0
+    for w in walls:
+        ex, ey, kind = WALL_EXIT_POSTURE.get(w.wall_type, (0.0, 1.6, "center gate"))
+        after = sorted((n for n in notes
+                        if 0.0 < n.time - w.time <= RECOVERY_BEATS),
+                       key=lambda n: n.time)
+        if not after:
+            continue
+        first = after[0]
+        dt = track.beats_to_seconds(first.time) - track.beats_to_seconds(w.time)
+        dist_m = math.hypot(first.x - ex, first.y - ey) * METERS_PER_GRID
+        if first.time - w.time < 0.5:
+            bad += 1
+            warnings.append(f"wall@{w.time:.0f}: object {first.time - w.time:.2f}b "
+                            f"after wall (needs >=0.5b recovery)")
+        elif dt > 0 and dist_m / dt > max_speed_ms * 0.8:
+            bad += 1
+            warnings.append(f"wall@{w.time:.0f}: exit reach {dist_m / dt:.1f} m/s "
+                            f"from {kind} posture")
+        if kind == "duck" and any(n.y > 2.6 for n in after if n.time - w.time < 1.0):
+            bad += 1
+            warnings.append(f"wall@{w.time:.0f}: high target <1 beat after duck")
+    score = 1.0 if not walls else max(0.0, 1.0 - bad / len(walls))
+    return score, warnings
+
+
 def _wall_fairness(walls, notes):
     """Walls must not collide with note demands (cleared window around each)."""
     warnings = []
@@ -408,6 +441,8 @@ def validate_and_repair(diff, track, phrases, max_speed_ms, base_per_beat) -> di
         play, w4 = _playability(diff.notes)
         cont, w5 = _rail_continuity(diff.rails, diff.notes, track, max_speed_ms)
         fair, w6 = _wall_fairness(getattr(diff, "walls", []), diff.notes)
+        recov, w7 = _wall_recovery(getattr(diff, "walls", []), diff.notes,
+                                   track, max_speed_ms)
         scores = {
             "hand_flow": round(flow, 3),
             "rail_smoothness": round(rail, 3),
@@ -416,12 +451,13 @@ def validate_and_repair(diff, track, phrases, max_speed_ms, base_per_beat) -> di
             "readability": round(read, 3),
             "playability": round(play, 3),
             "wall_fairness": round(fair, 3),
+            "wall_recovery": round(recov, 3),
             "beat_alignment": round(_beat_alignment(diff.notes), 3),
             "density_energy_match": round(_density_energy_match(diff.notes, phrases), 3),
             "motif_adherence": round(_motif_adherence(diff.notes, phrases), 3),
             "center_clustering": round(_center_clustering(diff.notes), 3),
         }
-        return scores, worst, w1 + w2 + w3 + w4 + w5 + w6
+        return scores, worst, w1 + w2 + w3 + w4 + w5 + w6 + w7
 
     scores, worst, warnings = run_scores()
     repairs = []
