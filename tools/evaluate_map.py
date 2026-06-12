@@ -36,6 +36,7 @@ T_DROP_DENSITY = 4.5
 T_CENTER_WARN = 0.35
 T_CENTER_FAIL = 0.40
 T_STRAIGHT_RAIL_FAIL = 0.50
+T_ROBOTIC_SPREAD = 0.45
 
 
 # --------------------------------------------------------------------------- #
@@ -369,6 +370,53 @@ def m_groove(objs, n_phrases, bpm):
             "dance_avg": round(dance_avg, 2)}, fails
 
 
+def _phase_locked_spread(po):
+    """Within one phrase: how much does the SAME moment of the bar move across
+    bars? Buckets each hand's notes by within-bar phase (eighth-bar slots) and
+    measures positional std across bars inside each bucket. Near zero = the
+    bar is a frozen curve replayed verbatim; a living groove breathes."""
+    spreads = []
+    for hand in (0, 1):
+        buckets = {}
+        for o in po:
+            if o.kind != "note" or o.hand != hand:
+                continue
+            bar = int((o.beat % PHRASE_BEATS) // 4.0)
+            slot = int(round(((o.beat % 4.0) / 4.0) * 8)) % 8
+            buckets.setdefault(slot, []).append((bar, o.x, o.y))
+        for pts in buckets.values():
+            if len({b for b, _, _ in pts}) < 3:
+                continue
+            arr = np.array([(x, y) for _, x, y in pts])
+            spreads.append(float(np.mean(arr.std(axis=0))))
+    return float(np.mean(spreads)) if spreads else None
+
+
+def m_robotic(objs, n_phrases):
+    """[8] Anti-robotic gate — the counterweight to the groove metric.
+    GrooveScore REWARDS bar-to-bar repetition; this fails a phrase whose bars
+    replay one frozen curve verbatim, which feels mechanical in VR no matter
+    how good the curve is (direct VR playtest finding). Repetition must
+    breathe: same figure, never the same frame."""
+    fails = []
+    per = {}
+    for p in range(n_phrases):
+        po = _phrase_objs(objs, p)
+        if sum(1 for o in po if o.kind == "note") < 12:
+            continue
+        s = _phase_locked_spread(po)
+        if s is None:
+            continue
+        per[p] = round(s, 2)
+        if s < T_ROBOTIC_SPREAD:
+            fails.append(f"phrase {p}: phase-locked spread {s:.2f} < "
+                         f"{T_ROBOTIC_SPREAD} — bars replay a frozen curve (robotic)")
+    vals = list(per.values())
+    avg = round(float(np.mean(vals)), 2) if vals else 0.0
+    return {"per_phrase": per, "avg_spread": avg,
+            "robotic_phrases": len(fails)}, fails
+
+
 def m_counterpoint(objs, n_phrases):
     fails = []
     rails = [o for o in objs if o.kind == "rail"]
@@ -504,7 +552,8 @@ def evaluate(path, bpm, make_plots, outdir):
     drop, f6 = m_drop(objs, n_phrases, bpm)
     motion, f7 = m_motion_smoothness(objs, n_phrases)
     groove, f8 = m_groove(objs, n_phrases, bpm)
-    all_fails = f1 + f2 + f3 + f4 + f5 + f6 + f7 + f8
+    robotic, f9 = m_robotic(objs, n_phrases)
+    all_fails = f1 + f2 + f3 + f4 + f5 + f6 + f7 + f8 + f9
     v = verdict(density, drop, all_fails)
 
     print("=" * 64)
@@ -524,6 +573,10 @@ def evaluate(path, bpm, make_plots, outdir):
           f"drop={drop['drop_ops']}obj/s/{drop['drop_width']}u")
     print(f"[G] GROOVESCORE avg={groove['avg']}  "
           f"DANCEMOVEMENT avg={groove.get('dance_avg', '-')}")
+    print(f"[8] HUMANIZE phase-locked spread avg={robotic['avg_spread']} "
+          f"(<{T_ROBOTIC_SPREAD}/phrase = robotic) "
+          f"robotic_phrases={robotic['robotic_phrases']} "
+          f"per-phrase={robotic['per_phrase']}")
     print("\n[5] PHRASE CHOREOGRAPHY + DANCE:")
     gmap = {g["phrase"]: g for g in groove["rows"]}
     for r in rows:
