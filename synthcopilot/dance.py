@@ -262,9 +262,39 @@ def _accent(role: str) -> float:
     return 0.6
 
 
+# Per-bar pose shifts (lean/lift): how a dancer varies a repeated step.
+# Deterministic and small — the figure stays recognizable, but no bar
+# replays the previous one verbatim (VR playtest: frozen loops feel robotic).
+_POSE_VAR = [(0.0, 0.0), (0.55, 0.3), (-0.45, 0.6), (0.6, -0.25),
+             (-0.6, 0.35), (0.35, 0.65), (-0.5, -0.3), (0.65, 0.45)]
+
+
+def _humanize(x, y, side, t, bar_idx, n_bars, phrase, scale=1.0):
+    """Repetition must breathe. Adds (1) a continuous phrase-long width
+    swell so the figure grows and relaxes across the phrase, and (2) a
+    per-bar lean/lift pose shift, desynced across phrases. Both are small
+    relative to the gesture itself; downstream clamps keep them playable.
+    `scale` lets sparse calm-anchor phrases breathe harder — fewer notes
+    per bar means each pose carries more of the phrase's life."""
+    arc = t / (BAR * max(n_bars, 1))
+    x += side * 0.4 * scale * math.sin(math.pi * arc * (2 + phrase.occurrence % 2))
+    dx, dy = _POSE_VAR[(bar_idx + int(phrase.start_beat) // 8) % len(_POSE_VAR)]
+    return x + dx * scale, y + dy * scale
+
+
+def humanize_pose(x, y, side, phrase, beat, scale=1.0):
+    """Apply the anti-robotic breathe/pose-shift to a position computed
+    OUTSIDE dance_position (e.g. mapgen's calm rail-phrase anchors)."""
+    t = beat - phrase.start_beat
+    n_bars = max(1, int(round((phrase.end_beat - phrase.start_beat) / BAR)))
+    bar_idx = min(int(t // BAR), n_bars - 1)
+    return _humanize(x, y, side, t, bar_idx, n_bars, phrase, scale)
+
+
 def dance_position(phrase, hand, beat, spread, brightness):
     """Where this object sits: the phrase's primitive gesture, repeated per
-    bar (A/A/A'/B), widened by phrase position, accented by beat strength."""
+    bar (A/A/A'/B), widened by phrase position, accented by beat strength,
+    humanized so repeats breathe instead of looping a frozen frame."""
     groove = groove_for(phrase)
     t = beat - phrase.start_beat
     n_bars = max(1, int(round((phrase.end_beat - phrase.start_beat) / BAR)))
@@ -277,4 +307,5 @@ def dance_position(phrase, hand, beat, spread, brightness):
     x, y = _GESTURES[groove](phase, side, amp, brightness, bar_idx, n_bars)
     if variation:
         y += 0.7    # A': the same figure, lifted — recognizably varied
+    x, y = _humanize(x, y, side, t, bar_idx, n_bars, phrase)
     return x, y, role

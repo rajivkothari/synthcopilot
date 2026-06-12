@@ -571,7 +571,7 @@ def _place_flow_notes(diff, onsets, snares, centroid_fn, intensity_at, phrases,
     kept.sort(key=lambda c: c[0])
 
     # --- DanceChoreographyPass: notes sit on the phrase's repeated groove --- #
-    from synthcopilot.dance import dance_position
+    from synthcopilot.dance import dance_position, humanize_pose
 
     notes_added = 0
     prev_hand = HAND_LEFT
@@ -626,6 +626,10 @@ def _place_flow_notes(diff, onsets, snares, centroid_fn, intensity_at, phrases,
             side = -1.0 if hand == HAND_LEFT else 1.0
             gx = side * (1.6 + 0.5 * spread)
             gy = 1.1 + 0.9 * b
+            # ...but a calm anchor must still breathe bar to bar, or the
+            # whole phrase replays one frozen pose (robotic). Sparse anchors
+            # breathe harder: each pose carries more of the phrase's life.
+            gx, gy = humanize_pose(gx, gy, side, ph, beat, scale=1.6)
         elif abs(gx) < 1.0 and 1.3 < gy < 2.4 and not role.startswith("strong"):
             gx += math.copysign(1.4, gx or (1.0 if hand == HAND_RIGHT else -1.0))
         gx += rng.uniform(-0.1, 0.1)

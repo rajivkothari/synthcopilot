@@ -101,6 +101,33 @@ def test_body_and_payoff_strings():
     assert "(" in body_for(ph)     # includes the hand relationship
 
 
+def test_bars_breathe_not_frozen():
+    """Anti-robotic (VR playtest): the same within-bar moment must NOT sit at
+    the same position every bar — repeats breathe — yet stay recognizable."""
+    ph = _phrase([5.0, 5.0])
+    ph.groove = "side_to_side"
+    pts = [dance_position(ph, HAND_RIGHT, ph.start_beat + bar * 4.0 + 1.0,
+                          0.8, 0.5)[:2] for bar in range(8)]
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    spread = (max(xs) - min(xs)) + (max(ys) - min(ys))
+    assert spread > 0.8, "bars replay a frozen curve (robotic)"
+    assert max(xs) - min(xs) < 2.5, "variation so large the step is unrecognizable"
+
+
+def test_humanize_desyncs_phrases():
+    """Bar k of one phrase must not strike the same pose as bar k of the next
+    occurrence of that section (the pose table is phrase-desynced)."""
+    phrases = build_phrase_map([5.0, 5.0, 5.0, 5.0], seed=0)
+    a, b = phrases[0], phrases[1]
+    a.groove = b.groove = "side_to_side"
+    pa = [dance_position(a, HAND_RIGHT, a.start_beat + bar * 4.0 + 1.0,
+                         0.8, 0.5)[:2] for bar in range(4)]
+    pb = [dance_position(b, HAND_RIGHT, b.start_beat + bar * 4.0 + 1.0,
+                         0.8, 0.5)[:2] for bar in range(4)]
+    assert pa != pb
+
+
 def test_movement_hints_honest_when_unlearned():
     from synthcopilot.style import StyleProfile
 
