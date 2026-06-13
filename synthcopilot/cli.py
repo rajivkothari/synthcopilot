@@ -156,12 +156,68 @@ def cmd_new(args):
 
     _print_debug_report(summary, track, bpm, offset, args.difficulty)
 
-    # H. Export gate: a Master request must EARN the Master verdict AND a
-    # tight beat lock (when enough percussive matches exist to judge).
+    output = args.output or _os.path.splitext(args.audio)[0] + ".synth"
+    _export_gated(summary, track, args.audio, output, args.difficulty,
+                  args.allow_lower, args.author or "SynthCoPilot")
+
+
+def cmd_capture(args):
+    """Compile a recorded VR dance into a map. The captured hand paths are the
+    choreography SOURCE (replacing the synthetic gesture primitives); the audio
+    engine still sets rhythm + density, so a captured Master map must clear the
+    same gate as a generated one. Trigger-held spans become rails."""
+    import os as _os
+
+    from synthcopilot.motion import CapturePath, load_recording
+
+    # BPM / offset.
+    if args.bpm is not None:
+        bpm, offset = args.bpm, args.offset
+    else:
+        bpm, offset = _detect_bpm(args.audio)
+        if args.offset:
+            offset = args.offset
+        print(f"Auto-detected BPM={bpm:.1f}, offset={offset:.3f}s")
+
+    name = args.name or _os.path.splitext(_os.path.basename(args.audio))[0]
+    track = new_track(
+        audio_filename=_os.path.basename(args.audio),
+        bpm=bpm, offset=offset, name=name, author=args.author,
+    )
+    recording = load_recording(args.recording)
+    print(f"Loaded dance recording: {recording.duration:.1f}s @ "
+          f"{recording.sample_rate:.0f}Hz ({len(recording.t)} frames)")
+    capture = CapturePath(recording, track)
+
+    summary = generate_map(
+        track, args.audio, StyleProfile.default(), difficulty=args.difficulty,
+        density_scale=args.density, with_rails=not args.no_rails,
+        max_hand_speed=args.max_hand_speed, seed=args.seed, capture=capture,
+    )
+    print(f"Compiled {summary['notes_added']} notes, {summary['rails_added']} "
+          f"rails FROM your dance into {args.difficulty}")
+
+    _print_debug_report(summary, track, bpm, offset, args.difficulty)
+
+    output = args.output or _os.path.splitext(args.recording)[0] + ".synth"
+    _export_gated(summary, track, args.audio, output, args.difficulty,
+                  args.allow_lower, args.author or "SynthCoPilot (dance)")
+
+
+def _export_gated(summary, track, audio_path, output, difficulty,
+                  allow_lower, mapper):
+    """Shared export path for `new` and `capture`: the in-generator gate, the
+    SMH write, and the INDEPENDENT arbiter's final say (it reads only the
+    exported objects). A Master request below Master is refused + removed
+    unless ``allow_lower``."""
+    import os as _os
+
+    # In-generator gate: Master must EARN the verdict AND a tight beat lock
+    # (when enough percussive matches exist to judge).
     verdict = summary.get("report", {}).get("verdict", "")
     bl = summary.get("beat_lock") or {}
     beat_locked = not (bl.get("matches", 0) >= 20 and bl.get("pct_50ms", 1.0) < 0.5)
-    if args.difficulty == "Master" and not args.allow_lower \
+    if difficulty == "Master" and not allow_lower \
             and (verdict not in ("Master", "Master Plus") or not beat_locked):
         why = f"verdict is '{verdict}'" if verdict not in ("Master", "Master Plus") \
             else f"beat lock too loose ({bl.get('pct_50ms', 0):.0%} within 50ms)"
@@ -175,17 +231,13 @@ def cmd_new(args):
             "synth_mapping_helper is required to write editor-correct .synth files. "
             "Install it: pip install synth-mapping-helper"
         )
-    output = args.output or _os.path.splitext(args.audio)[0] + ".synth"
-    smh_io.write_synth(track, args.audio, output, mapper=args.author or "SynthCoPilot")
+    smh_io.write_synth(track, audio_path, output, mapper=mapper)
 
-    # H2. The INDEPENDENT arbiter has the final say: re-evaluate the exported
-    # file (it reads only the objects, not the generator's plan). If it rejects
-    # a Master request, remove the file unless --allow-lower.
     indep = _independent_verdict(output, track.bpm)
     if indep:
         print(f"Independent evaluator verdict: {indep}")
-        if args.difficulty == "Master" and indep not in ("Master", "Master Plus") \
-                and not args.allow_lower:
+        if difficulty == "Master" and indep not in ("Master", "Master Plus") \
+                and not allow_lower:
             _os.remove(output)
             raise SystemExit(
                 f"Refusing to export: independent evaluator says '{indep}', not "
@@ -355,6 +407,30 @@ def main():
     p_new.add_argument("--name", help="Map name (default: audio filename)")
     p_new.add_argument("--author", default="", help="Map author")
     p_new.set_defaults(func=cmd_new)
+
+    # -- capture --
+    p_cap = subparsers.add_parser(
+        "capture",
+        help="Compile a recorded VR dance (tools/capture_dance.py) into a map")
+    p_cap.add_argument("--audio", required=True, help="Path to source audio (.mp3/.ogg/.wav)")
+    p_cap.add_argument("--recording", required=True,
+                       help="Dance recording JSON from tools/capture_dance.py")
+    p_cap.add_argument("--output", help="Output .synth path (default: <recording>.synth)")
+    p_cap.add_argument("--bpm", type=float, help="Track BPM (auto-detected if omitted)")
+    p_cap.add_argument("--offset", type=float, default=0.0, help="First-beat offset in seconds")
+    p_cap.add_argument("--difficulty", default="Master", help="Target difficulty (default: Master)")
+    p_cap.add_argument("--density", type=float, default=1.0,
+                       help="Scale note density along your dance (default: 1.0)")
+    p_cap.add_argument("--max-hand-speed", type=float, default=6.0,
+                       help="Max hand speed in METERS/sec — the no-teleport limit (default: 6.0)")
+    p_cap.add_argument("--no-rails", action="store_true",
+                       help="Ignore trigger-held spans (no rails)")
+    p_cap.add_argument("--allow-lower", action="store_true",
+                       help="Export even if the quality verdict is below Master")
+    p_cap.add_argument("--seed", type=int, help="RNG seed for reproducible output")
+    p_cap.add_argument("--name", help="Map name (default: audio filename)")
+    p_cap.add_argument("--author", default="", help="Map author")
+    p_cap.set_defaults(func=cmd_capture)
 
     args = parser.parse_args()
     if not args.command:

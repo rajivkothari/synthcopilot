@@ -85,6 +85,7 @@ def generate_map(
     intensity_fn: Callable[[float], float] | None = None,
     snares: list[tuple[float, float]] | None = None,
     duration_sec: float | None = None,
+    capture: object | None = None,
 ) -> dict:
     """Choreograph ``difficulty`` of ``track_data`` to the audio.
 
@@ -210,7 +211,22 @@ def generate_map(
 
     rails_added = 0
     rail_windows: list[tuple[float, float, int]] = []   # (start, end, hand)
-    if with_rails and have_energy:
+    if with_rails and capture is not None:
+        # CAPTURE MODE: rails come LITERALLY from the player's trigger-held
+        # spans (the "hold the trigger and move" gesture), not from synthesized
+        # energy windows. The free hand still taps along the path (counterpoint
+        # reads rail_windows below).
+        for hand in (HAND_RIGHT, HAND_LEFT):
+            for s, e in capture.trigger_spans(hand, min_beats=1.0):
+                s, e = max(0.0, s), min(e, total_beats)
+                if e - s < 1.0:
+                    continue
+                nodes = capture.rail_nodes(hand, s, e)
+                if len(nodes) >= 2:
+                    diff.rails.append(Rail(hand_type=hand, nodes=nodes))
+                    rails_added += 1
+                    rail_windows.append((s, e, hand))
+    elif with_rails and have_energy:
         step = 0.25
         bs = np.arange(0.0, total_beats, step)
         secs = [track_data.beats_to_seconds(float(b)) for b in bs]
@@ -293,6 +309,7 @@ def generate_map(
         diff, onsets, snares, centroid_fn, intensity_at, phrases, rail_windows,
         recoveries, track_data, preset, density_scale, max_speed_grid,
         total_beats, rng,
+        position_fn=capture.position if capture is not None else None,
     )
 
     # --- BeatLockVerifier: measure + correct grid alignment --------------- #
@@ -304,6 +321,7 @@ def generate_map(
     report = validate_and_repair(
         diff, track_data, phrases, max_hand_speed,
         base_per_beat=preset["note_density"] * density_scale,
+        position_fn=capture.position if capture is not None else None,
     )
 
     return {
@@ -500,7 +518,7 @@ def _section_intensities(intensity_fn, track, total_beats, chunk_beats=32.0):
 
 def _place_flow_notes(diff, onsets, snares, centroid_fn, intensity_at, phrases,
                       rail_windows, recoveries, track, preset, density_scale,
-                      max_hand_speed, total_beats, rng):
+                      max_hand_speed, total_beats, rng, position_fn=None):
     """Place notes ON the hand's choreography path at the phrase's rhythm.
 
     Each hand follows a continuous path (paths.py); notes are waypoints along
@@ -571,8 +589,13 @@ def _place_flow_notes(diff, onsets, snares, centroid_fn, intensity_at, phrases,
     kept.sort(key=lambda c: c[0])
 
     # --- DanceChoreographyPass: notes sit on the phrase's repeated groove --- #
+    # In CAPTURE MODE ``position_fn`` is the player's real hand path (a drop-in
+    # for dance_position); we then skip the synthetic flourishes (shatter,
+    # rail-mode calm anchor, center-limiter, jitter) so the dance is preserved.
     from synthcopilot.dance import dance_position, humanize_pose
 
+    place = position_fn or dance_position
+    capture_mode = position_fn is not None
     notes_added = 0
     prev_hand = HAND_LEFT
     pos: dict[int, tuple[float, float, float] | None] = {HAND_RIGHT: None, HAND_LEFT: None}
@@ -596,9 +619,9 @@ def _place_flow_notes(diff, onsets, snares, centroid_fn, intensity_at, phrases,
         # never during wall recovery (a double-wide reach would contradict
         # the body's posture).
         if beat in shatter_beats and ph.shatters and railing is None \
-                and recovery is None:
+                and recovery is None and not capture_mode:
             for h in (HAND_LEFT, HAND_RIGHT):
-                gx, gy, _role = dance_position(ph, h, beat, spread, b)
+                gx, gy, _role = place(ph, h, beat, spread, b)
                 gx += math.copysign(0.8 + 0.5 * spread, gx or (1.0 if h == HAND_RIGHT else -1.0))
                 x2, y2 = _reach_clamp(gx, gy, pos[h], t_sec, max_hand_speed,
                                       math.copysign(1.0, gx))
@@ -618,8 +641,10 @@ def _place_flow_notes(diff, onsets, snares, centroid_fn, intensity_at, phrases,
         # DANCE PASS: position = the phrase's repeated groove gesture, accented
         # by beat strength. Center-gravity limiter: a weak beat that lands in
         # the center box is nudged outward unless it's a deliberate downbeat.
-        gx, gy, role = dance_position(ph, hand, beat, spread, b)
-        if ph.rail_mode == "long":
+        gx, gy, role = place(ph, hand, beat, spread, b)
+        if capture_mode:
+            pass  # the captured hand path is the truth — no synthetic override
+        elif ph.rail_mode == "long":
             # Rail-first phrases (intro/breakdown/outro): the free hand plays
             # CALM, repeated downbeat anchors — a steady home-side accent —
             # while the rail carries the expression. No busy tap patterns.
@@ -632,8 +657,9 @@ def _place_flow_notes(diff, onsets, snares, centroid_fn, intensity_at, phrases,
             gx, gy = humanize_pose(gx, gy, side, ph, beat, scale=1.6)
         elif abs(gx) < 1.0 and 1.3 < gy < 2.4 and not role.startswith("strong"):
             gx += math.copysign(1.4, gx or (1.0 if hand == HAND_RIGHT else -1.0))
-        gx += rng.uniform(-0.1, 0.1)
-        gy += rng.uniform(-0.1, 0.1)
+        if not capture_mode:
+            gx += rng.uniform(-0.1, 0.1)
+            gy += rng.uniform(-0.1, 0.1)
 
         # Recovery window: pull the target toward the wall-exit posture, with
         # the allowed radius growing as the body recovers; after a duck, no

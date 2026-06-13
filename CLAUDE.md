@@ -51,6 +51,14 @@ python -m synthcopilot new --audio song.mp3 --difficulty Master --output song.sy
 # the GUI
 python -m synthcopilot --gui
 
+# DANCE CAPTURE: record a Quest 3 performance (PCVR + SteamVR), compile it.
+# The recorded hand paths are the choreography SOURCE; the audio engine still
+# sets rhythm + density (so a captured Master map clears the SAME gate).
+python tools/capture_dance.py --out dance.json --countdown 3   # on the VR rig
+python tools/capture_dance.py --dry-run --out dance.json       # no headset (testing)
+python -m synthcopilot capture --audio song.mp3 --recording dance.json \
+    --difficulty Master --output song.synth
+
 # evaluate ANY .synth independently of the generator
 python tools/evaluate_map.py --input song.synth --difficulty Master --style beastmode \
     --bpm 123 --plots          # writes per-phrase plots to debug/phrases/
@@ -100,11 +108,12 @@ Module map:
 | `synthcopilot/rhythm.py` | `analyze_audio` (the song-understanding layer) + onset/snap helpers |
 | `synthcopilot/phrases.py` | ChoreographyPlanner: sections, grammar, motifs |
 | `synthcopilot/dance.py` | DanceChoreographyPass: per-bar groove gestures (A/A/A'/B) |
-| `synthcopilot/mapgen.py` | orchestrates B→H; rhythm slots, placement, rails, walls |
+| `synthcopilot/mapgen.py` | orchestrates B→H; rhythm slots, placement, rails, walls. Accepts an optional `capture=` choreography source (see motion.py) |
+| `synthcopilot/motion.py` | dance-capture source: recording I/O + `CapturePath` (a `dance_position` drop-in built from real Quest 3 hand paths; trigger-holds→rails). Fed by `tools/capture_dance.py` (pyopenvr) |
 | `synthcopilot/geometry.py` | low-level rail curve math (Bezier + wave/zigzag/staircase) |
 | `synthcopilot/quality.py` | in-generator validator + repair pass + verdict |
 | `synthcopilot/style.py` | optional learn-style-from-a-folder profile (Markov) — secondary |
-| `synthcopilot/cli.py` | `inspect` / `generate` / `new` subcommands + debug report |
+| `synthcopilot/cli.py` | `inspect` / `generate` / `new` / `capture` subcommands + debug report |
 | `synthcopilot/gui.py` | customtkinter GUI ("New from MP3", timing fields) |
 | `tools/evaluate_map.py` | **the independent arbiter** (does NOT import the generator's plan) |
 

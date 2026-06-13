@@ -330,23 +330,26 @@ def _verdict(avg_ops, peak_ops, scores) -> str:
     return "Master Plus" if avg_ops >= 4.5 and peak_ops >= 7 else "Master"
 
 
-def _motif_adherence(notes, phrases):
+def _motif_adherence(notes, phrases, position_fn=None):
     """Do notes actually lie ON their phrase's planned choreography path?
 
     Each note is compared to its (phrase, hand) path position at its beat.
     Tolerances cover the deliberate offsets (brightness lift, jitter, shatter
-    fling); anything further is off-choreography scatter.
+    fling); anything further is off-choreography scatter. In capture mode
+    ``position_fn`` is the player's real hand path, so a captured note is
+    checked against the dance it came from, not the synthetic primitive.
     """
     if not notes:
         return 1.0
     from synthcopilot.dance import dance_position
     from synthcopilot.phrases import phrase_at
 
+    place = position_fn or dance_position
     ok = 0
     for n in notes:
         ph = phrase_at(phrases, n.time)
         spread = min(0.30 + 0.70 * (ph.intensity - 1.0) / 9.0 + ph.spread_boost, 1.0)
-        px, py, _role = dance_position(ph, n.hand_type, n.time, spread, 0.5)
+        px, py, _role = place(ph, n.hand_type, n.time, spread, 0.5)
         dx = abs(n.x - px)
         dy = max(0.0, abs(n.y - py) - 1.5)    # brightness + center-limiter allowance
         ok += math.hypot(dx, dy) <= 2.2       # gesture + accent + clamp tolerance
@@ -432,8 +435,13 @@ def trim_overdense(notes, phrases, base_per_beat) -> int:
 #  Orchestration
 # --------------------------------------------------------------------------- #
 
-def validate_and_repair(diff, track, phrases, max_speed_ms, base_per_beat) -> dict:
-    """Score -> repair -> re-score. Returns the debug report dict."""
+def validate_and_repair(diff, track, phrases, max_speed_ms, base_per_beat,
+                        *, position_fn=None) -> dict:
+    """Score -> repair -> re-score. Returns the debug report dict.
+
+    ``position_fn`` (capture mode) overrides the choreography path that
+    motif-adherence checks notes against — so a captured dance is judged by the
+    path the player actually performed, not the synthetic primitive."""
     def run_scores():
         flow, worst, w1 = _hand_flow(diff.notes, track, max_speed_ms)
         rail, w2 = _rail_smoothness(diff.rails)
@@ -454,7 +462,7 @@ def validate_and_repair(diff, track, phrases, max_speed_ms, base_per_beat) -> di
             "wall_recovery": round(recov, 3),
             "beat_alignment": round(_beat_alignment(diff.notes), 3),
             "density_energy_match": round(_density_energy_match(diff.notes, phrases), 3),
-            "motif_adherence": round(_motif_adherence(diff.notes, phrases), 3),
+            "motif_adherence": round(_motif_adherence(diff.notes, phrases, position_fn), 3),
             "center_clustering": round(_center_clustering(diff.notes), 3),
         }
         return scores, worst, w1 + w2 + w3 + w4 + w5 + w6 + w7
